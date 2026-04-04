@@ -1,9 +1,13 @@
 const WHATSAPP_NUMBER = "628970788800";
+const DESKTOP_BREAKPOINT = 980;
+const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 const header = document.querySelector(".header");
 const nav = document.querySelector(".nav");
 const navToggle = document.querySelector(".nav-toggle");
+const navToggleText = navToggle?.querySelector(".nav-toggle-text");
 const navMenu = document.querySelector(".nav-menu");
+const navBackdrop = document.querySelector(".nav-backdrop");
 const navLinks = document.querySelectorAll(".nav-menu a[href^='#']");
 const yearEl = document.getElementById("year");
 const revealElements = document.querySelectorAll(".reveal");
@@ -30,30 +34,33 @@ const syncWhatsAppLinks = () => {
 };
 
 const handleHeaderState = () => {
+  if (!header) {
+    return;
+  }
+
   header.classList.toggle("scrolled", window.scrollY > 16);
 };
 
-const closeNav = () => {
+const setNavState = (isOpen) => {
   if (!nav || !navMenu || !navToggle) {
     return;
   }
 
-  nav.classList.remove("nav-open");
-  navMenu.classList.remove("is-open");
-  navToggle.setAttribute("aria-expanded", "false");
-};
+  nav.classList.toggle("nav-open", isOpen);
+  navMenu.classList.toggle("is-open", isOpen);
+  navToggle.setAttribute("aria-expanded", String(isOpen));
+  navToggle.setAttribute("aria-label", isOpen ? "Tutup menu" : "Buka menu");
+  document.body.classList.toggle("menu-open", isOpen && window.innerWidth < DESKTOP_BREAKPOINT);
 
-const openNav = () => {
-  if (!nav || !navMenu || !navToggle) {
-    return;
+  if (navToggleText) {
+    navToggleText.textContent = isOpen ? "Tutup" : "Menu";
   }
-
-  nav.classList.add("nav-open");
-  navMenu.classList.add("is-open");
-  navToggle.setAttribute("aria-expanded", "true");
 };
 
-if (navToggle) {
+const closeNav = () => setNavState(false);
+const openNav = () => setNavState(true);
+
+if (navToggle && navMenu && nav) {
   navToggle.addEventListener("click", () => {
     const isOpen = navMenu.classList.contains("is-open");
     if (isOpen) {
@@ -64,8 +71,22 @@ if (navToggle) {
     openNav();
   });
 
+  navBackdrop?.addEventListener("click", closeNav);
+
   document.addEventListener("click", (event) => {
     if (!nav.contains(event.target)) {
+      closeNav();
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeNav();
+    }
+  });
+
+  window.addEventListener("resize", () => {
+    if (window.innerWidth >= DESKTOP_BREAKPOINT) {
       closeNav();
     }
   });
@@ -79,13 +100,23 @@ faqItems.forEach((item) => {
   const button = item.querySelector(".faq-question");
   const answer = item.querySelector(".faq-answer");
 
+  if (!button || !answer) {
+    return;
+  }
+
   button.addEventListener("click", () => {
     const isOpen = item.classList.contains("is-open");
 
     faqItems.forEach((faqItem) => {
+      const currentButton = faqItem.querySelector(".faq-question");
+      const currentAnswer = faqItem.querySelector(".faq-answer");
+
       faqItem.classList.remove("is-open");
-      faqItem.querySelector(".faq-question").setAttribute("aria-expanded", "false");
-      faqItem.querySelector(".faq-answer").style.maxHeight = null;
+      currentButton?.setAttribute("aria-expanded", "false");
+
+      if (currentAnswer) {
+        currentAnswer.style.maxHeight = null;
+      }
     });
 
     if (!isOpen) {
@@ -96,22 +127,34 @@ faqItems.forEach((item) => {
   });
 });
 
-const revealObserver = new IntersectionObserver((entries) => {
-  entries.forEach((entry) => {
-    if (!entry.isIntersecting) {
-      return;
-    }
+const revealImmediately = () => {
+  revealElements.forEach((element) => element.classList.add("is-visible"));
+};
 
-    entry.target.classList.add("is-visible");
-    revealObserver.unobserve(entry.target);
-  });
-}, { threshold: 0.18 });
+if ("IntersectionObserver" in window && !prefersReducedMotion.matches) {
+  const revealObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) {
+        return;
+      }
 
-revealElements.forEach((element) => revealObserver.observe(element));
+      entry.target.classList.add("is-visible");
+      revealObserver.unobserve(entry.target);
+    });
+  }, { threshold: 0.18 });
+
+  revealElements.forEach((element) => revealObserver.observe(element));
+} else {
+  revealImmediately();
+}
+
+const setCounterValue = (counter, value) => {
+  const suffix = counter.dataset.suffix || "";
+  counter.textContent = `${value.toLocaleString("id-ID")}${suffix}`;
+};
 
 const animateCounter = (counter) => {
   const target = Number(counter.dataset.target || 0);
-  const suffix = counter.dataset.suffix || "";
   const duration = 1300;
   const startTime = performance.now();
 
@@ -120,7 +163,7 @@ const animateCounter = (counter) => {
     const eased = 1 - Math.pow(1 - progress, 3);
     const currentValue = Math.round(target * eased);
 
-    counter.textContent = `${currentValue.toLocaleString("id-ID")}${suffix}`;
+    setCounterValue(counter, currentValue);
 
     if (progress < 1) {
       window.requestAnimationFrame(updateCounter);
@@ -130,18 +173,24 @@ const animateCounter = (counter) => {
   window.requestAnimationFrame(updateCounter);
 };
 
-const counterObserver = new IntersectionObserver((entries) => {
-  entries.forEach((entry) => {
-    if (!entry.isIntersecting) {
-      return;
-    }
+if ("IntersectionObserver" in window && !prefersReducedMotion.matches) {
+  const counterObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) {
+        return;
+      }
 
-    animateCounter(entry.target);
-    counterObserver.unobserve(entry.target);
+      animateCounter(entry.target);
+      counterObserver.unobserve(entry.target);
+    });
+  }, { threshold: 0.7 });
+
+  counters.forEach((counter) => counterObserver.observe(counter));
+} else {
+  counters.forEach((counter) => {
+    setCounterValue(counter, Number(counter.dataset.target || 0));
   });
-}, { threshold: 0.7 });
-
-counters.forEach((counter) => counterObserver.observe(counter));
+}
 
 if (contactForm) {
   contactForm.addEventListener("submit", (event) => {
