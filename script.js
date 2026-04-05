@@ -16,6 +16,7 @@ const faqItems = document.querySelectorAll(".faq-item");
 const waLinks = document.querySelectorAll(".wa-link");
 const waNumberFields = document.querySelectorAll("[data-wa-number]");
 const contactForm = document.getElementById("contact-form");
+const backToTopButton = document.querySelector(".back-to-top");
 
 const buildWaUrl = (message = "") => {
   const base = `https://wa.me/${WHATSAPP_NUMBER}`;
@@ -39,6 +40,15 @@ const handleHeaderState = () => {
   }
 
   header.classList.toggle("scrolled", window.scrollY > 16);
+};
+
+const handleBackToTopState = () => {
+  if (!backToTopButton) {
+    return;
+  }
+
+  const shouldShow = window.innerWidth <= 699 && window.scrollY > 320;
+  backToTopButton.classList.toggle("is-visible", shouldShow);
 };
 
 const setNavState = (isOpen) => {
@@ -218,10 +228,22 @@ if (contactForm) {
   });
 }
 
+if (backToTopButton) {
+  backToTopButton.addEventListener("click", () => {
+    window.scrollTo({
+      top: 0,
+      behavior: prefersReducedMotion.matches ? "auto" : "smooth"
+    });
+  });
+}
+
 if (yearEl) {
   yearEl.textContent = new Date().getFullYear();
 }
 
 syncWhatsAppLinks();
 handleHeaderState();
+handleBackToTopState();
 window.addEventListener("scroll", handleHeaderState, { passive: true });
+window.addEventListener("scroll", handleBackToTopState, { passive: true });
+window.addEventListener("resize", handleBackToTopState);
