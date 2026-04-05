@@ -1431,34 +1431,47 @@ svg {
   }
 
   .header {
-    padding: 10px 0;
+    padding: 8px 0;
   }
 
   .header-inner {
-    gap: 12px;
-    padding: 8px 10px;
-    border-radius: 18px;
+    gap: 10px;
+    padding: 10px 12px 10px 10px;
+    border-radius: 22px;
+    box-shadow: 0 14px 30px rgba(8, 36, 71, 0.09);
+  }
+
+  .brand {
+    gap: 10px;
   }
 
   .brand img {
-    width: 68px;
+    width: 64px;
   }
 
   .nav-toggle {
-    min-width: 94px;
-    height: 48px;
-    padding: 0 12px;
+    min-width: 92px;
+    height: 50px;
+    padding: 0 14px;
+    gap: 10px;
+    border-radius: 18px;
+    box-shadow: 0 10px 22px rgba(8, 36, 71, 0.1);
+  }
+
+  .nav-toggle-box span {
+    width: 18px;
   }
 
   .nav-toggle-text {
-    font-size: 0.86rem;
+    font-size: 0.84rem;
+    letter-spacing: 0.01em;
   }
 
   .nav-menu {
-    top: 78px;
+    top: 82px;
     left: 12px;
     right: 12px;
-    max-height: calc(100vh - 98px);
+    max-height: calc(100vh - 102px);
     padding: 16px;
     gap: 8px;
   }
@@ -1540,6 +1553,11 @@ svg {
     width: 52px;
     height: 52px;
     margin-bottom: 16px;
+  }
+
+  .footer-brand img {
+    width: 64px;
+    margin-bottom: 14px;
   }
 
   .gallery-media {
