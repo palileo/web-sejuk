@@ -1,5 +1,6 @@
 const WHATSAPP_NUMBER = "628970788800";
 const DESKTOP_BREAKPOINT = 980;
+const MOBILE_BREAKPOINT = 699;
 const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 const header = document.querySelector(".header");
@@ -16,6 +17,7 @@ const faqItems = document.querySelectorAll(".faq-item");
 const waLinks = document.querySelectorAll(".wa-link");
 const waNumberFields = document.querySelectorAll("[data-wa-number]");
 const contactForm = document.getElementById("contact-form");
+const heroMobileFormButton = document.querySelector("[data-mobile-form-target]");
 
 const buildWaUrl = (message = "") => {
   const base = `https://wa.me/${WHATSAPP_NUMBER}`;
@@ -31,6 +33,26 @@ const syncWhatsAppLinks = () => {
   waNumberFields.forEach((field) => {
     field.textContent = WHATSAPP_NUMBER;
   });
+};
+
+const syncHeroMobileFormButton = () => {
+  if (!heroMobileFormButton) {
+    return;
+  }
+
+  const mobileFormTarget = heroMobileFormButton.dataset.mobileFormTarget;
+
+  if (!mobileFormTarget) {
+    return;
+  }
+
+  if (window.innerWidth <= MOBILE_BREAKPOINT) {
+    heroMobileFormButton.href = mobileFormTarget;
+    return;
+  }
+
+  const message = heroMobileFormButton.dataset.message || "";
+  heroMobileFormButton.href = buildWaUrl(message);
 };
 
 const handleHeaderState = () => {
@@ -223,5 +245,7 @@ if (yearEl) {
 }
 
 syncWhatsAppLinks();
+syncHeroMobileFormButton();
 handleHeaderState();
 window.addEventListener("scroll", handleHeaderState, { passive: true });
+window.addEventListener("resize", syncHeroMobileFormButton);
