@@ -13,6 +13,7 @@ let editingUserId = null;
 let remoteSaveTimer = null;
 let remoteReady = false;
 let deferredInstallPrompt = null;
+let needsRender = false;
 
 function defaultAccounts(){
   const admin = APP_DATA.admin;
@@ -118,20 +119,41 @@ async function pullRemoteState(){
     const result = await response.json();
     if(result?.state){
       const remoteState = normalizeState(result.state);
-      const localTime = Date.parse(state.updatedAt || "");
-      const remoteTime = Date.parse(remoteState.updatedAt || "");
-      if(Number.isFinite(localTime) && (!Number.isFinite(remoteTime) || localTime > remoteTime)){
+      const serverTime = result.updatedAt;
+      const lastServerTime = localStorage.getItem("koperasi_last_server_time");
+      
+      if(serverTime === lastServerTime){
         remoteReady = true;
-        pushRemoteState();
+        const lastPushed = localStorage.getItem("koperasi_last_pushed_time");
+        if(state.updatedAt && state.updatedAt !== lastPushed){
+          pushRemoteState();
+        }
         return;
       }
+      
+      if(state.updatedAt === remoteState.updatedAt){
+        remoteReady = true;
+        if(serverTime) localStorage.setItem("koperasi_last_server_time", serverTime);
+        return;
+      }
+      
       state = remoteState;
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      if(serverTime) localStorage.setItem("koperasi_last_server_time", serverTime);
+      localStorage.setItem("koperasi_last_pushed_time", state.updatedAt);
       remoteReady = true;
-      render();
+      
+      const activeEl = document.activeElement;
+      const isTyping = activeEl && ["INPUT", "TEXTAREA", "SELECT"].includes(activeEl.tagName);
+      if(!isTyping) {
+        render();
+        needsRender = false;
+      } else {
+        needsRender = true;
+      }
     } else {
       remoteReady = true;
-      pushRemoteState();
+      if (state.updatedAt) pushRemoteState();
     }
   } catch(error) {
     remoteReady = false;
@@ -141,6 +163,7 @@ async function pullRemoteState(){
 async function pushRemoteState(){
   try {
     clearTimeout(remoteSaveTimer);
+    const pushedTime = state.updatedAt;
     const response = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
@@ -148,6 +171,7 @@ async function pushRemoteState(){
     });
     if(!response.ok) throw new Error("Sinkron database gagal.");
     remoteReady = true;
+    localStorage.setItem("koperasi_last_pushed_time", pushedTime);
     return true;
   } catch(error) {
     remoteReady = false;
@@ -273,7 +297,7 @@ function getEvaluation(evaluatorId, targetId){
 }
 function setEvaluation(evaluation){
   state.evaluations[key(evaluation.evaluatorId,evaluation.targetId)] = evaluation;
-  return saveState({ immediate: true });
+  saveState();
 }
 function allEvaluationRows(){
   const approvedIds = new Set(approvedChecklistAccounts().map(acc => acc.memberId));
@@ -707,12 +731,12 @@ async function bindInputView(){
       toast(error.message || "Upload bukti gagal.");
       return;
     }
-    const savedRemote = await setEvaluation({ evaluatorId: activeUser, targetId: selectedTarget, items, submittedAt: new Date().toISOString() });
-    toast(savedRemote ? "Checklist berhasil disimpan ke database." : "Checklist disimpan lokal. Sinkron database akan dicoba lagi.");
+    setEvaluation({ evaluatorId: activeUser, targetId: selectedTarget, items, submittedAt: new Date().toISOString() });
+    toast("Checklist berhasil disimpan.");
     renderView();
   };
-  document.querySelector("#reset-current").onclick = async () => {
-    if(confirm("Kosongkan penilaian Anda untuk pengurus ini?")){ delete state.evaluations[key(activeUser,selectedTarget)]; await saveState({ immediate: true }); renderView(); }
+  document.querySelector("#reset-current").onclick = () => {
+    if(confirm("Kosongkan penilaian Anda untuk pengurus ini?")){ delete state.evaluations[key(activeUser,selectedTarget)]; saveState(); toast("Penilaian dikosongkan."); renderView(); }
   };
 }
 function evaluationsView(){
@@ -811,12 +835,12 @@ function bindCashFlowView(){
   if(sheetSelect){
     sheetSelect.onchange = event => {
       state.cashFlow.selectedSheet = event.target.value;
-      saveState({ immediate: true });
+      saveState();
       renderView();
     };
   }
   document.querySelectorAll(".cash-cell").forEach(input => {
-    input.onchange = async event => {
+    input.onchange = event => {
       const sheet = selectedCashFlowSheet();
       if(!sheet) return;
       const row = Number(event.target.dataset.row);
@@ -825,7 +849,7 @@ function bindCashFlowView(){
       while(sheet.rows[row].length <= col) sheet.rows[row].push("");
       sheet.rows[row][col] = event.target.value;
       syncCashFlowShu();
-      await saveState({ immediate: true });
+      saveState();
       renderView();
     };
   });
@@ -838,7 +862,7 @@ async function importCashFlowFile(file){
   const fileDataUrl = await readFileAsDataUrl(file);
   state.cashFlow = { fileName: file.name, fileType: file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileDataUrl, importedAt: new Date().toISOString(), selectedSheet: sheets[0]?.name || "", sheets };
   syncCashFlowShu();
-  await saveState({ immediate: true });
+  saveState();
   toast("File arus kas berhasil diimport.");
   renderView();
 }
@@ -1282,6 +1306,15 @@ function bindPasswordPanel(){
 render();
 setupInstallPrompt();
 pullRemoteState();
-setInterval(() => {
-  if(activeUser && isAdmin() && activeTab === "admin-evaluations") pullRemoteState();
-}, 15000);
+setInterval(pullRemoteState, 5000);
+
+document.addEventListener("focusout", () => {
+  setTimeout(() => {
+    const activeEl = document.activeElement;
+    const isTyping = activeEl && ["INPUT", "TEXTAREA", "SELECT"].includes(activeEl.tagName);
+    if (!isTyping && needsRender) {
+      needsRender = false;
+      render();
+    }
+  }, 100);
+});
