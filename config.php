@@ -4,7 +4,7 @@ declare(strict_types=1);
 const DB_HOST = 'localhost';
 const DB_NAME = 'indoseju_mak_db';
 const DB_USER = 'indoseju_mak';
-const DB_PASS = 'GANTI_PASSWORD_DATABASE_DI_CPANEL';
+const DB_PASS = 'M4k4r_y0';
 const APP_STATE_KEY = 'main';
 
 function db(): PDO

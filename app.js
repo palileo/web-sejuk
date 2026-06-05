@@ -2,6 +2,7 @@ const STORAGE_KEY = "koperasi_checklist_shu_v1";
 const SESSION_KEY = "koperasi_active_user_v1";
 const AUTH_SCHEMA_VERSION = 2;
 const API_URL = "api.php";
+const CASHFLOW_MAX_FILE_SIZE = 6 * 1024 * 1024;
 const app = document.querySelector("#app");
 let state = loadState();
 let activeUser = sessionStorage.getItem(SESSION_KEY);
@@ -19,7 +20,7 @@ function defaultAccounts(){
   };
 }
 function loadState(){
-  const fallback = { evaluations: {}, totalShu: 0, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt: null };
+  const fallback = { evaluations: {}, totalShu: 0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt: null };
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
     const shouldResetUsers = saved.authSchemaVersion !== AUTH_SCHEMA_VERSION;
@@ -37,7 +38,7 @@ function saveState(options = {}){
   if(!options.localOnly) scheduleRemoteSave();
 }
 function normalizeState(data){
-  const fallback = { evaluations: {}, totalShu: 0, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt: null };
+  const fallback = { evaluations: {}, totalShu: 0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt: null };
   const clean = cleanLegacyFields(data || {});
   const admin = APP_DATA.admin;
   const savedAdmin = clean.accounts?.[admin.id] || {};
@@ -45,6 +46,8 @@ function normalizeState(data){
     ...fallback,
     ...clean,
     totalShu: Number(clean.totalShu || 0),
+    shuDistribution: normalizeShuDistribution(clean.shuDistribution),
+    cashFlow: normalizeCashFlow(clean.cashFlow),
     accounts: cleanLegacyFields({
       ...fallback.accounts,
       ...(clean.accounts || {}),
@@ -63,6 +66,32 @@ function normalizeState(data){
     signupRequests: cleanLegacyFields(clean.signupRequests || []),
     passwordRequests: cleanLegacyFields(clean.passwordRequests || []),
     authSchemaVersion: AUTH_SCHEMA_VERSION
+  };
+}
+function defaultShuDistribution(){ return { pengurus: 0.9, anggota: 0.1 }; }
+function normalizeShuDistribution(value){
+  const fallback = defaultShuDistribution();
+  return {
+    pengurus: normalizePercentValue(value?.pengurus, fallback.pengurus),
+    anggota: normalizePercentValue(value?.anggota, fallback.anggota)
+  };
+}
+function normalizeCashFlow(value){
+  if(!value || typeof value !== "object" || !Array.isArray(value.sheets)) return null;
+  const sheets = value.sheets
+    .filter(sheet => sheet && typeof sheet.name === "string" && Array.isArray(sheet.rows))
+    .map(sheet => ({
+      name: sheet.name,
+      rows: sheet.rows.map(row => Array.isArray(row) ? row.map(cell => cell ?? "") : [])
+    }));
+  if(!sheets.length) return null;
+  return {
+    fileName: String(value.fileName || "arus-kas.xlsx"),
+    fileType: String(value.fileType || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    fileDataUrl: typeof value.fileDataUrl === "string" ? value.fileDataUrl : "",
+    importedAt: value.importedAt || null,
+    selectedSheet: sheets.some(sheet => sheet.name === value.selectedSheet) ? value.selectedSheet : sheets[0].name,
+    sheets
   };
 }
 async function hashPassword(text) {
@@ -168,6 +197,30 @@ function rupiah(value){ return new Intl.NumberFormat("id-ID",{style:"currency",c
 function rupiahInput(value){ return Number(value || 0).toLocaleString("id-ID"); }
 function parseRupiah(value){ return Number(String(value || "").replace(/[^\d]/g, "")) || 0; }
 function pct(value){ return `${Math.round((value||0)*100)}%`; }
+function normalizePercentValue(value, fallback = 0){
+  if(value === null || value === undefined || value === "") return fallback;
+  if(typeof value === "number" && Number.isFinite(value)) return clampPercent(value > 1 ? value / 100 : value, fallback);
+  const text = String(value).trim();
+  if(!text) return fallback;
+  const numeric = parseLocalizedNumber(text.replace("%", ""));
+  if(!Number.isFinite(numeric)) return fallback;
+  return clampPercent(text.includes("%") || numeric > 1 ? numeric / 100 : numeric, fallback);
+}
+function parseLocalizedNumber(value){
+  const text = String(value || "").replace(/[^\d,.-]/g, "");
+  if(!text) return NaN;
+  if(text.includes(",") && text.includes(".")) return Number(text.replace(/\./g, "").replace(",", "."));
+  if(text.includes(",")) return Number(text.replace(",", "."));
+  return Number(text);
+}
+function clampPercent(value, fallback){
+  if(!Number.isFinite(value) || value < 0) return fallback;
+  return Math.min(value, 1);
+}
+function parseSpreadsheetMoney(value){
+  if(typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.round(value));
+  return parseRupiah(value);
+}
 function safe(text){ return String(text ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch])); }
 function key(evaluatorId, targetId){ return `${evaluatorId}__${targetId}`; }
 function ratingOptions(){ return APP_DATA.ratings || []; }
@@ -227,8 +280,9 @@ function calculateTarget(targetId){
 function summary(){
   const rows = APP_DATA.members.map(m => ({...calculateTarget(m.id), member:m}));
   const totalSeriousness = rows.reduce((a,r)=>a+r.seriousness,0);
+  const distribution = normalizeShuDistribution(state.shuDistribution);
   return rows.map(r => {
-    const pengurusPct = totalSeriousness === 0 ? 0 : (r.seriousness / totalSeriousness) * 0.9;
+    const pengurusPct = totalSeriousness === 0 ? 0 : (r.seriousness / totalSeriousness) * distribution.pengurus;
     return {...r, shuPct: pengurusPct, shuNominal: (state.totalShu||0) * pengurusPct};
   });
 }
@@ -245,7 +299,8 @@ function registeredShuRows(){
     const base = baseByMember[acc.memberId];
     return { ...base, member: { id: acc.id, name: acc.name, role: acc.role }, account: acc, shuPct: base.shuPct || 0, shuNominal: (state.totalShu || 0) * (base.shuPct || 0) };
   });
-  const anggotaPct = anggota.length ? 0.1 / anggota.length : 0;
+  const distribution = normalizeShuDistribution(state.shuDistribution);
+  const anggotaPct = anggota.length ? distribution.anggota / anggota.length : 0;
   const anggotaRows = anggota.map(acc => ({ targetId: acc.id, member: { id: acc.id, name: acc.name, role: "Anggota" }, account: acc, evaluatorCount: 0, seriousness: 0, category: "Anggota", completed: 0, progress: 0, pending: 0, shuPct: anggotaPct, shuNominal: (state.totalShu || 0) * anggotaPct }));
   return [...nonMemberRows, ...anggotaRows];
 }
@@ -440,8 +495,9 @@ function renderShell(){
   document.querySelector("#active-user").textContent = accountLabel(activeAccount());
   refreshInstallButton();
   document.querySelector("#install-app-btn").onclick = installApp;
-  if(isAdmin() && !["admin","profile","settings"].includes(activeTab)) activeTab = "admin";
+  if(isAdmin() && !["admin","profile","cashflow","settings"].includes(activeTab)) activeTab = "admin";
   document.querySelector(".admin-tab").classList.toggle("hidden", !isAdmin());
+  document.querySelector(".admin-only-tab").classList.toggle("hidden", !isAdmin());
   document.querySelector('[data-tab="settings"]').classList.toggle("hidden", !isAdmin());
   document.querySelectorAll('[data-tab="dashboard"], [data-tab="input"], [data-tab="evaluations"], [data-tab="shu"]').forEach(btn => btn.classList.toggle("hidden", isAdmin()));
   document.querySelectorAll('[data-tab="input"], [data-tab="evaluations"]').forEach(btn => btn.classList.toggle("hidden", !isChecklistMember(activeUser)));
@@ -457,6 +513,7 @@ function renderShell(){
 function renderView(){
   const view = document.querySelector("#view");
   if(activeTab === "admin") { view.innerHTML = adminView(); bindAdminView(); return; }
+  if(activeTab === "cashflow") { view.innerHTML = cashFlowView(); bindCashFlowView(); return; }
   if(activeTab === "dashboard") view.innerHTML = dashboardView();
   if(activeTab === "profile") { view.innerHTML = profileView(); bindProfileView(); }
   if(activeTab === "input") { view.innerHTML = inputView(); bindInputView(); }
@@ -643,7 +700,8 @@ function evaluationRow(ev){
 }
 function shuView(){
   const rows = registeredShuRows();
-  return `<section class="card"><div class="toolbar"><div><h2>Pembagian SHU Otomatis</h2><p class="muted">Pengurus mendapat 90% SHU berdasarkan proporsi nilai. Anggota mendapat 10% SHU, dibagi rata jika lebih dari satu anggota approved.</p></div><button class="ghost" onclick="window.print()">Cetak</button></div><label style="max-width:360px">Input Total SHU<span class="rupiah-wrap"><span>Rp</span><input id="total-shu" type="text" inputmode="numeric" autocomplete="off" value="${rupiahInput(state.totalShu)}" placeholder="0" /></span></label><div id="shu-table">${rows.length ? `<div class="table-wrap" style="margin-top:16px">${summaryTable(rows, true)}</div>` : '<div class="empty">Belum ada user approved untuk pembagian SHU.</div>'}</div></section>`;
+  const distribution = normalizeShuDistribution(state.shuDistribution);
+  return `<section class="card"><div class="toolbar"><div><h2>Pembagian SHU Otomatis</h2><p class="muted">Pengurus mendapat ${pct(distribution.pengurus)} SHU berdasarkan proporsi nilai. Anggota mendapat ${pct(distribution.anggota)} SHU, dibagi rata jika lebih dari satu anggota approved.</p></div><button class="ghost" onclick="window.print()">Cetak</button></div><label style="max-width:360px">Input Total SHU<span class="rupiah-wrap"><span>Rp</span><input id="total-shu" type="text" inputmode="numeric" autocomplete="off" value="${rupiahInput(state.totalShu)}" placeholder="0" /></span></label><div id="shu-table">${rows.length ? `<div class="table-wrap" style="margin-top:16px">${summaryTable(rows, true)}</div>` : '<div class="empty">Belum ada user approved untuk pembagian SHU.</div>'}</div></section>`;
 }
 function bindShuView(){
   const input = document.querySelector("#total-shu");
@@ -654,6 +712,264 @@ function bindShuView(){
     const rows = registeredShuRows();
     document.querySelector("#shu-table").innerHTML = rows.length ? `<div class="table-wrap" style="margin-top:16px">${summaryTable(rows, true)}</div>` : '<div class="empty">Belum ada user approved untuk pembagian SHU.</div>';
   });
+}
+function cashFlowView(){
+  const cashFlow = state.cashFlow;
+  const distribution = normalizeShuDistribution(state.shuDistribution);
+  const selected = selectedCashFlowSheet();
+  const sheets = cashFlow?.sheets || [];
+  return `<div class="grid cards">
+    <article class="card metric"><span>Total SHU</span><strong>${rupiah(state.totalShu)}</strong></article>
+    <article class="card metric"><span>SHU Pengurus</span><strong>${pct(distribution.pengurus)}</strong></article>
+    <article class="card metric"><span>SHU Anggota</span><strong>${pct(distribution.anggota)}</strong></article>
+    <article class="card metric"><span>Sheet Terbaca</span><strong>${sheets.length}</strong></article>
+  </div>
+  <section class="card" style="margin-top:18px">
+    <div class="toolbar">
+      <div><h2>Arus Kas</h2><p class="muted">Import file XLSX laporan kas. Nilai Dashboard!H17 mengisi Total SHU, SHU!C11 mengisi persen pengurus, dan SHU!C9 mengisi persen anggota.</p></div>
+      <div class="actions">
+        <label class="primary file-action">Import XLSX<input id="cashflow-import" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" class="hidden"></label>
+        ${cashFlow?.fileDataUrl ? `<button id="open-cashflow-file" class="ghost" type="button">Buka File</button>` : ""}
+      </div>
+    </div>
+    ${cashFlow ? `<div class="note">File: <strong>${safe(cashFlow.fileName)}</strong>${cashFlow.importedAt ? `, diimport ${new Date(cashFlow.importedAt).toLocaleString("id-ID")}` : ""}. Perubahan pada tabel di bawah disimpan ke aplikasi dan langsung memperbarui SHU jika menyentuh sel rujukan.</div>` : '<div class="empty">Belum ada file arus kas. Import file XLSX untuk menampilkan dan menyinkronkan data.</div>'}
+    ${cashFlow ? cashFlowWorkbookPanel(selected, sheets) : ""}
+  </section>`;
+}
+function cashFlowWorkbookPanel(selected, sheets){
+  if(!selected) return "";
+  return `<div class="toolbar cashflow-toolbar">
+    <label>Sheet<select id="cashflow-sheet">${sheets.map(sheet => `<option value="${safe(sheet.name)}" ${sheet.name === selected.name ? "selected" : ""}>${safe(sheet.name)}</option>`).join("")}</select></label>
+    <div class="cashflow-cells"><span>Dashboard!H17: <strong>${rupiah(state.totalShu)}</strong></span><span>SHU!C11: <strong>${pct(normalizeShuDistribution(state.shuDistribution).pengurus)}</strong></span><span>SHU!C9: <strong>${pct(normalizeShuDistribution(state.shuDistribution).anggota)}</strong></span></div>
+  </div>
+  <div class="table-wrap cashflow-table">${cashFlowSheetTable(selected)}</div>`;
+}
+function selectedCashFlowSheet(){
+  const cashFlow = state.cashFlow;
+  if(!cashFlow?.sheets?.length) return null;
+  return cashFlow.sheets.find(sheet => sheet.name === cashFlow.selectedSheet) || cashFlow.sheets[0];
+}
+function cashFlowSheetTable(sheet){
+  const rowCount = Math.max(20, Math.min(160, sheet.rows.length || 0));
+  const usedCols = sheet.rows.reduce((max, row) => Math.max(max, row.length), 0);
+  const colCount = Math.max(8, Math.min(40, usedCols || 0));
+  const headers = Array.from({length: colCount}, (_, index) => `<th>${columnName(index)}</th>`).join("");
+  const body = Array.from({length: rowCount}, (_, rowIndex) => {
+    const cells = Array.from({length: colCount}, (_, colIndex) => {
+      const value = sheet.rows[rowIndex]?.[colIndex] ?? "";
+      return `<td><input class="cash-cell" data-row="${rowIndex}" data-col="${colIndex}" value="${safe(value)}" aria-label="${columnName(colIndex)}${rowIndex + 1}"></td>`;
+    }).join("");
+    return `<tr><th class="row-head">${rowIndex + 1}</th>${cells}</tr>`;
+  }).join("");
+  return `<table><thead><tr><th class="row-head"></th>${headers}</tr></thead><tbody>${body}</tbody></table>`;
+}
+function bindCashFlowView(){
+  const importInput = document.querySelector("#cashflow-import");
+  if(importInput){
+    importInput.onchange = async event => {
+      const file = event.target.files?.[0];
+      if(!file) return;
+      try {
+        await importCashFlowFile(file);
+      } catch(error) {
+        toast(error.message || "Import XLSX gagal.");
+      } finally {
+        importInput.value = "";
+      }
+    };
+  }
+  const openButton = document.querySelector("#open-cashflow-file");
+  if(openButton) openButton.onclick = openCashFlowFile;
+  const sheetSelect = document.querySelector("#cashflow-sheet");
+  if(sheetSelect){
+    sheetSelect.onchange = event => {
+      state.cashFlow.selectedSheet = event.target.value;
+      saveState();
+      renderView();
+    };
+  }
+  document.querySelectorAll(".cash-cell").forEach(input => {
+    input.onchange = event => {
+      const sheet = selectedCashFlowSheet();
+      if(!sheet) return;
+      const row = Number(event.target.dataset.row);
+      const col = Number(event.target.dataset.col);
+      while(sheet.rows.length <= row) sheet.rows.push([]);
+      while(sheet.rows[row].length <= col) sheet.rows[row].push("");
+      sheet.rows[row][col] = event.target.value;
+      syncCashFlowShu();
+      saveState();
+      renderView();
+    };
+  });
+}
+async function importCashFlowFile(file){
+  if(!/\.xlsx$/i.test(file.name)) throw new Error("File harus berformat .xlsx.");
+  if(file.size > CASHFLOW_MAX_FILE_SIZE) throw new Error("Ukuran file XLSX maksimal 6 MB.");
+  const buffer = await file.arrayBuffer();
+  const sheets = await parseXlsxWorkbook(buffer);
+  const fileDataUrl = await readFileAsDataUrl(file);
+  state.cashFlow = { fileName: file.name, fileType: file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileDataUrl, importedAt: new Date().toISOString(), selectedSheet: sheets[0]?.name || "", sheets };
+  syncCashFlowShu();
+  saveState();
+  toast("File arus kas berhasil diimport.");
+  renderView();
+}
+function openCashFlowFile(){
+  const cashFlow = state.cashFlow;
+  if(!cashFlow?.fileDataUrl){ toast("File arus kas belum tersedia."); return; }
+  const a = document.createElement("a");
+  a.href = cashFlow.fileDataUrl;
+  a.download = cashFlow.fileName || "arus-kas.xlsx";
+  a.target = "_blank";
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+function syncCashFlowShu(){
+  const cashFlow = state.cashFlow;
+  if(!cashFlow?.sheets?.length) return;
+  const total = cashFlowCell("dashboard", 16, 7);
+  const pengurus = cashFlowCell("shu", 10, 2);
+  const anggota = cashFlowCell("shu", 8, 2);
+  state.totalShu = parseSpreadsheetMoney(total);
+  state.shuDistribution = {
+    pengurus: normalizePercentValue(pengurus, 0.9),
+    anggota: normalizePercentValue(anggota, 0.1)
+  };
+}
+function cashFlowCell(sheetName, rowIndex, colIndex){
+  const sheet = state.cashFlow?.sheets?.find(item => item.name.trim().toLowerCase() === sheetName);
+  return sheet?.rows?.[rowIndex]?.[colIndex] ?? "";
+}
+function readFileAsDataUrl(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("File tidak bisa dibaca."));
+    reader.readAsDataURL(file);
+  });
+}
+async function parseXlsxWorkbook(buffer){
+  if(!window.DecompressionStream) throw new Error("Browser belum mendukung pembacaan XLSX. Gunakan Chrome atau Edge terbaru.");
+  const files = await unzipXlsxFiles(buffer);
+  const workbookXml = textFile(files, "xl/workbook.xml");
+  const relsXml = textFile(files, "xl/_rels/workbook.xml.rels");
+  if(!workbookXml || !relsXml) throw new Error("Struktur XLSX tidak valid.");
+  const sharedStrings = parseSharedStrings(textFile(files, "xl/sharedStrings.xml"));
+  const rels = parseWorkbookRelationships(relsXml);
+  const sheets = parseWorkbookSheets(workbookXml, rels)
+    .map(sheet => ({ name: sheet.name, rows: parseWorksheetRows(textFile(files, sheet.path), sharedStrings) }))
+    .filter(sheet => sheet.rows.length);
+  if(!sheets.length) throw new Error("Tidak ada sheet yang bisa dibaca dari file XLSX.");
+  return sheets;
+}
+async function unzipXlsxFiles(buffer){
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  const eocd = findZipEnd(view);
+  const entryCount = view.getUint16(eocd + 10, true);
+  let offset = view.getUint32(eocd + 16, true);
+  const files = {};
+  for(let i = 0; i < entryCount; i++){
+    if(view.getUint32(offset, true) !== 0x02014b50) throw new Error("Central directory XLSX rusak.");
+    const method = view.getUint16(offset + 10, true);
+    const compressedSize = view.getUint32(offset + 20, true);
+    const fileNameLength = view.getUint16(offset + 28, true);
+    const extraLength = view.getUint16(offset + 30, true);
+    const commentLength = view.getUint16(offset + 32, true);
+    const localOffset = view.getUint32(offset + 42, true);
+    const name = new TextDecoder().decode(bytes.slice(offset + 46, offset + 46 + fileNameLength)).replace(/\\/g, "/");
+    const localNameLength = view.getUint16(localOffset + 26, true);
+    const localExtraLength = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const compressed = bytes.slice(dataStart, dataStart + compressedSize);
+    if(!name.endsWith("/")){
+      files[name] = method === 0 ? compressed : await inflateRaw(compressed, method);
+    }
+    offset += 46 + fileNameLength + extraLength + commentLength;
+  }
+  return files;
+}
+function findZipEnd(view){
+  for(let offset = view.byteLength - 22; offset >= 0; offset--){
+    if(view.getUint32(offset, true) === 0x06054b50) return offset;
+  }
+  throw new Error("File XLSX tidak valid.");
+}
+async function inflateRaw(bytes, method){
+  if(method !== 8) throw new Error("Metode kompresi XLSX tidak didukung.");
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+function textFile(files, path){
+  const bytes = files[path];
+  return bytes ? new TextDecoder("utf-8").decode(bytes) : "";
+}
+function xmlDoc(xml){
+  return new DOMParser().parseFromString(xml || "<root/>", "application/xml");
+}
+function xmlChildren(node, name){
+  return Array.from(node.getElementsByTagName("*")).filter(item => item.localName === name);
+}
+function parseSharedStrings(xml){
+  if(!xml) return [];
+  return xmlChildren(xmlDoc(xml), "si").map(si => xmlChildren(si, "t").map(t => t.textContent || "").join(""));
+}
+function parseWorkbookRelationships(xml){
+  return Object.fromEntries(xmlChildren(xmlDoc(xml), "Relationship").map(rel => {
+    const target = rel.getAttribute("Target") || "";
+    const path = target.startsWith("/") ? target.slice(1) : `xl/${target}`.replace(/\/[^/]+\/\.\.\//g, "/");
+    return [rel.getAttribute("Id"), path.replace(/\\/g, "/")];
+  }));
+}
+function parseWorkbookSheets(xml, rels){
+  return xmlChildren(xmlDoc(xml), "sheet").map(sheet => {
+    const relId = sheet.getAttribute("r:id") || sheet.getAttribute("id");
+    return { name: sheet.getAttribute("name") || "Sheet", path: rels[relId] };
+  }).filter(sheet => sheet.path);
+}
+function parseWorksheetRows(xml, sharedStrings){
+  if(!xml) return [];
+  const rows = [];
+  xmlChildren(xmlDoc(xml), "c").forEach(cell => {
+    const ref = cell.getAttribute("r") || "";
+    const position = cellRefToIndexes(ref);
+    if(!position) return;
+    const value = readCellValue(cell, sharedStrings);
+    while(rows.length <= position.row) rows.push([]);
+    rows[position.row][position.col] = value;
+  });
+  return rows.map(row => row.map(cell => cell ?? ""));
+}
+function readCellValue(cell, sharedStrings){
+  const type = cell.getAttribute("t");
+  if(type === "inlineStr") return xmlChildren(cell, "t").map(t => t.textContent || "").join("");
+  const value = xmlChildren(cell, "v")[0]?.textContent ?? "";
+  if(type === "s") return sharedStrings[Number(value)] ?? "";
+  if(type === "b") return value === "1" ? "TRUE" : "FALSE";
+  if(value === "") return "";
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : value;
+}
+function cellRefToIndexes(ref){
+  const match = /^([A-Z]+)(\d+)$/i.exec(ref);
+  if(!match) return null;
+  return { row: Number(match[2]) - 1, col: columnIndex(match[1]) };
+}
+function columnIndex(name){
+  return name.toUpperCase().split("").reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0) - 1;
+}
+function columnName(index){
+  let name = "";
+  let value = index + 1;
+  while(value > 0){
+    const mod = (value - 1) % 26;
+    name = String.fromCharCode(65 + mod) + name;
+    value = Math.floor((value - mod) / 26);
+  }
+  return name;
 }
 function adminView(){
   const requests = state.signupRequests || [];
@@ -846,10 +1162,10 @@ function bindSettingsView(){
   document.querySelector("#export-json").onclick = downloadJson;
   if(isAdmin()) bindUserManagementControls();
   bindPasswordPanel();
-  document.querySelector("#clear-data").onclick = () => { if(confirm("Hapus semua data penilaian, akun, request sign up, request ganti password, dan total SHU di browser ini?")){ state = { evaluations:{}, totalShu:0, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt:null}; saveState(); toast("Data dihapus."); renderView(); } };
+  document.querySelector("#clear-data").onclick = () => { if(confirm("Hapus semua data penilaian, akun, request sign up, request ganti password, arus kas, dan total SHU di browser ini?")){ state = { evaluations:{}, totalShu:0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt:null}; saveState(); toast("Data dihapus."); renderView(); } };
   document.querySelector("#import-json").onchange = (e) => {
     const file = e.target.files[0]; if(!file) return;
-    const reader = new FileReader(); reader.onload = () => { try { const data = cleanLegacyFields(JSON.parse(reader.result)); state = { evaluations: data.evaluations || {}, totalShu: Number(data.totalShu||0), accounts: { ...defaultAccounts(), ...(data.accounts || {}) }, signupRequests: data.signupRequests || [], passwordRequests: data.passwordRequests || [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt: data.updatedAt || new Date().toISOString() }; saveState(); toast("Backup berhasil diimpor."); renderView(); } catch { toast("File JSON tidak valid."); } }; reader.readAsText(file);
+    const reader = new FileReader(); reader.onload = () => { try { const data = cleanLegacyFields(JSON.parse(reader.result)); state = normalizeState({ evaluations: data.evaluations || {}, totalShu: Number(data.totalShu||0), shuDistribution: data.shuDistribution || defaultShuDistribution(), cashFlow: data.cashFlow || null, accounts: { ...defaultAccounts(), ...(data.accounts || {}) }, signupRequests: data.signupRequests || [], passwordRequests: data.passwordRequests || [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt: data.updatedAt || new Date().toISOString() }); saveState(); toast("Backup berhasil diimpor."); renderView(); } catch { toast("File JSON tidak valid."); } }; reader.readAsText(file);
   };
 }
 function bindPasswordPanel(){

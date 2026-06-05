@@ -11,6 +11,8 @@ Aplikasi web statis responsif untuk checklist kinerja pengurus koperasi dan simu
 - Dashboard otomatis membaca seluruh data checklist yang tersimpan.
 - Nilai keseriusan otomatis dihitung dari semua penilaian yang masuk.
 - Pembagian SHU otomatis: pengurus mendapat 90% berdasarkan proporsi nilai keseriusan, anggota mendapat 10% dibagi rata.
+- Panel admin **Arus Kas** untuk import file `.xlsx`, melihat isi sheet, mengedit nilai sel, dan membuka kembali file asli.
+- Import arus kas otomatis membaca `Dashboard!H17` sebagai **Input Total SHU**, `SHU!C11` sebagai persentase SHU pengurus, dan `SHU!C9` sebagai persentase SHU anggota.
 - Panel checklist memakai rating 1 sampai 5 bintang, setiap bintang bernilai 20 poin.
 - Bukti penilaian mendukung upload gambar dari device/kamera dan otomatis dikonversi ke WebP di browser.
 - Dashboard profil user lengkap dengan data diri dan foto profil WebP.
@@ -40,6 +42,8 @@ Role **Anggota** melihat dashboard, profil, dan panel pembagian SHU. Panel pemba
 Panel **Isi Checklist** dan **Data Penilaian** hanya memakai data user pengurus yang sudah sign up dan di-approve admin.
 
 Panel **Pengaturan** hanya ditampilkan untuk admin.
+
+Panel **Arus Kas** hanya ditampilkan untuk admin. File `.xlsx` yang diimport disimpan ke data aplikasi bersama hasil pembacaan sheet, sehingga bisa tampil lagi setelah sinkron ke database. Ukuran file import dibatasi maksimal 6 MB agar backup dan sinkronisasi tetap stabil.
 
 ## Cara Menjalankan Lokal
 
@@ -127,8 +131,9 @@ Password aplikasi statis masih tersimpan di browser/file JavaScript, sehingga be
 - 4 bintang = 80
 - 5 bintang = 100
 - Nilai keseriusan = total skor bobot / total bobot yang dinilai
-- Total SHU pengurus = 90% dari total SHU
-- Persentase SHU pengurus = 90% × nilai keseriusan pengurus / total nilai keseriusan semua pengurus
-- Total SHU anggota = 10% dari total SHU
-- Persentase SHU anggota = 10% / jumlah anggota approved
+- Total SHU diambil otomatis dari sheet `Dashboard` sel `H17` jika file arus kas sudah diimport
+- Persentase SHU pengurus diambil dari sheet `SHU` sel `C11`, fallback 90% jika belum ada file
+- Persentase SHU pengurus = persentase pengurus × nilai keseriusan pengurus / total nilai keseriusan semua pengurus
+- Persentase SHU anggota diambil dari sheet `SHU` sel `C9`, fallback 10% jika belum ada file
+- Persentase SHU anggota = persentase anggota / jumlah anggota approved
 - Nominal SHU = total SHU × persentase SHU
