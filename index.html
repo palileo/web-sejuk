@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0f766e" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Checklist SHU" />
+  <title>Aplikasi Checklist Kinerja & Pembagian SHU</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/icon.svg" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main id="app"></main>
+  <template id="login-template">
+    <section class="login-shell">
+      <div class="login-card">
+        <div class="login-heading">
+          <div class="brand-pill">Koperasi Indosejuk</div>
+          <h1>Sign In Checklist SHU</h1>
+          <p class="muted">Masuk sebagai pengurus untuk mengisi checklist, melihat dashboard, dan menghitung pembagian SHU.</p>
+        </div>
+
+        <form id="login-form" class="stack auth-panel">
+          <label>Akun
+            <select id="login-user" required></select>
+          </label>
+          <label>Password
+            <span class="password-wrap">
+              <input id="login-password" type="password" autocomplete="current-password" placeholder="Masukkan password" required />
+              <button id="toggle-password" class="icon-btn" type="button" aria-label="Lihat password">Lihat</button>
+            </span>
+          </label>
+          <button class="primary full" type="submit">Sign In</button>
+          <button id="signup-open" class="ghost full" type="button">Daftar Pengguna Baru</button>
+          <p id="login-error" class="error hidden"></p>
+        </form>
+
+        <form id="signup-form" class="stack auth-panel hidden">
+          <div>
+            <h2>Sign Up Pengguna Baru</h2>
+            <p class="muted">Akun baru harus diverifikasi admin sebelum bisa masuk ke aplikasi.</p>
+          </div>
+          <div class="auth-grid">
+            <label>Ajukan Akses Sebagai
+              <select id="signup-member" required></select>
+            </label>
+          </div>
+          <label>Password Baru
+            <span class="password-wrap">
+              <input id="signup-password" type="password" autocomplete="new-password" minlength="6" placeholder="Minimal 6 karakter" required />
+              <button id="toggle-signup-password" class="icon-btn" type="button" aria-label="Lihat password sign up">Lihat</button>
+            </span>
+          </label>
+          <label>Catatan untuk Admin
+            <textarea id="signup-note">Nama:
+Alamat:
+Tanggal Lahir:
+Nomor WA:</textarea>
+          </label>
+          <div class="actions">
+            <button class="primary" type="submit">Kirim Sign Up</button>
+            <button id="signup-back" class="ghost" type="button">Kembali</button>
+          </div>
+          <p id="signup-message" class="success hidden"></p>
+          <p id="signup-error" class="error hidden"></p>
+        </form>
+        <div class="hint-box compact">
+          Akun pengurus dan anggota dibuat melalui sign up, lalu diverifikasi admin.
+        </div>
+      </div>
+    </section>
+  </template>
+  <template id="shell-template">
+    <header class="topbar">
+      <div>
+        <div class="brand-pill small">Dashboard Koperasi</div>
+        <h1>Checklist Kinerja & SHU</h1>
+      </div>
+      <div class="user-box">
+        <span id="active-user"></span>
+        <button id="install-app-btn" class="ghost install-btn hidden" type="button">Instal App</button>
+        <button id="logout-btn" class="ghost">Keluar</button>
+      </div>
+    </header>
+    <nav class="tabs" aria-label="Navigasi utama">
+      <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="profile">Profil</button>
+      <button data-tab="admin" class="admin-tab hidden">Admin</button>
+      <button data-tab="input">Isi Checklist</button>
+      <button data-tab="evaluations">Data Penilaian</button>
+      <button data-tab="shu">Pembagian SHU</button>
+      <button data-tab="settings">Pengaturan</button>
+    </nav>
+    <section id="view"></section>
+  </template>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
