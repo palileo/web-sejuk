@@ -2,7 +2,8 @@ const STORAGE_KEY = "koperasi_checklist_shu_v1";
 const SESSION_KEY = "koperasi_active_user_v1";
 const AUTH_SCHEMA_VERSION = 2;
 const API_URL = "api.php";
-const CASHFLOW_MAX_FILE_SIZE = 6 * 1024 * 1024;
+const CASHFLOW_FILE_URL = `${API_URL}?action=cashflow-file`;
+const CASHFLOW_MAX_FILE_SIZE = 4 * 1024 * 1024;
 const app = document.querySelector("#app");
 let state = loadState();
 let activeUser = sessionStorage.getItem(SESSION_KEY);
@@ -35,7 +36,13 @@ function saveState(options = {}){
   state.authSchemaVersion = AUTH_SCHEMA_VERSION;
   state.updatedAt = new Date().toISOString();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  if(!options.localOnly) scheduleRemoteSave();
+  if(options.localOnly) return Promise.resolve(false);
+  if(options.immediate) {
+    clearTimeout(remoteSaveTimer);
+    return pushRemoteState();
+  }
+  scheduleRemoteSave();
+  return Promise.resolve(false);
 }
 function normalizeState(data){
   const fallback = { evaluations: {}, totalShu: 0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt: null };
@@ -110,7 +117,15 @@ async function pullRemoteState(){
     if(!response.ok) throw new Error("API database belum siap.");
     const result = await response.json();
     if(result?.state){
-      state = normalizeState(result.state);
+      const remoteState = normalizeState(result.state);
+      const localTime = Date.parse(state.updatedAt || "");
+      const remoteTime = Date.parse(remoteState.updatedAt || "");
+      if(Number.isFinite(localTime) && (!Number.isFinite(remoteTime) || localTime > remoteTime)){
+        remoteReady = true;
+        pushRemoteState();
+        return;
+      }
+      state = remoteState;
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       remoteReady = true;
       render();
@@ -125,6 +140,7 @@ async function pullRemoteState(){
 }
 async function pushRemoteState(){
   try {
+    clearTimeout(remoteSaveTimer);
     const response = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
@@ -132,9 +148,11 @@ async function pushRemoteState(){
     });
     if(!response.ok) throw new Error("Sinkron database gagal.");
     remoteReady = true;
+    return true;
   } catch(error) {
     remoteReady = false;
     console.warn(error.message || error);
+    return false;
   }
 }
 function cleanLegacyFields(value){
@@ -253,7 +271,10 @@ function badgeClass(cat){ return cat === "Sangat Serius" ? "good" : cat === "Ser
 function getEvaluation(evaluatorId, targetId){
   return state.evaluations[key(evaluatorId,targetId)] || { evaluatorId, targetId, items:{}, submittedAt:null };
 }
-function setEvaluation(evaluation){ state.evaluations[key(evaluation.evaluatorId,evaluation.targetId)] = evaluation; saveState(); }
+function setEvaluation(evaluation){
+  state.evaluations[key(evaluation.evaluatorId,evaluation.targetId)] = evaluation;
+  return saveState({ immediate: true });
+}
 function allEvaluationRows(){
   const approvedIds = new Set(approvedChecklistAccounts().map(acc => acc.memberId));
   return Object.values(state.evaluations || {}).filter(e => e && e.evaluatorId !== e.targetId && approvedIds.has(e.evaluatorId) && approvedIds.has(e.targetId));
@@ -495,13 +516,13 @@ function renderShell(){
   document.querySelector("#active-user").textContent = accountLabel(activeAccount());
   refreshInstallButton();
   document.querySelector("#install-app-btn").onclick = installApp;
-  if(isAdmin() && !["admin","profile","cashflow","settings"].includes(activeTab)) activeTab = "admin";
+  if(isAdmin() && !["admin","profile","admin-evaluations","cashflow","settings"].includes(activeTab)) activeTab = "admin";
   document.querySelector(".admin-tab").classList.toggle("hidden", !isAdmin());
-  document.querySelector(".admin-only-tab").classList.toggle("hidden", !isAdmin());
+  document.querySelectorAll(".admin-only-tab").forEach(btn => btn.classList.toggle("hidden", !isAdmin()));
   document.querySelector('[data-tab="settings"]').classList.toggle("hidden", !isAdmin());
   document.querySelectorAll('[data-tab="dashboard"], [data-tab="input"], [data-tab="evaluations"], [data-tab="shu"]').forEach(btn => btn.classList.toggle("hidden", isAdmin()));
   document.querySelectorAll('[data-tab="input"], [data-tab="evaluations"]').forEach(btn => btn.classList.toggle("hidden", !isChecklistMember(activeUser)));
-  if(!isAdmin() && activeTab === "settings") activeTab = "dashboard";
+  if(!isAdmin() && ["admin","admin-evaluations","cashflow","settings"].includes(activeTab)) activeTab = "dashboard";
   if(!isChecklistMember(activeUser) && ["input","evaluations"].includes(activeTab)) activeTab = "dashboard";
   document.querySelector("#logout-btn").onclick = () => { sessionStorage.removeItem(SESSION_KEY); activeUser = null; activeTab = "dashboard"; render(); };
   document.querySelectorAll(".tabs button").forEach(btn => {
@@ -513,8 +534,9 @@ function renderShell(){
 function renderView(){
   const view = document.querySelector("#view");
   if(activeTab === "admin") { view.innerHTML = adminView(); bindAdminView(); return; }
+  if(activeTab === "admin-evaluations") { view.innerHTML = adminEvaluationsView(); bindOpenCashFlowButtons(); return; }
   if(activeTab === "cashflow") { view.innerHTML = cashFlowView(); bindCashFlowView(); return; }
-  if(activeTab === "dashboard") view.innerHTML = dashboardView();
+  if(activeTab === "dashboard") { view.innerHTML = dashboardView(); bindDashboardView(); }
   if(activeTab === "profile") { view.innerHTML = profileView(); bindProfileView(); }
   if(activeTab === "input") { view.innerHTML = inputView(); bindInputView(); }
   if(activeTab === "evaluations") view.innerHTML = evaluationsView();
@@ -528,6 +550,7 @@ function dashboardView(){
   const countVery = rows.filter(r=>r.category==="Sangat Serius").length;
   const evalCount = allEvaluationRows().length;
   const showRules = isChecklistMember(activeUser);
+  const openFileButton = state.cashFlow?.fileDataUrl ? `<button class="ghost open-cashflow-file" type="button">Buka File Arus Kas</button>` : "";
   return `<div class="grid cards">
     <article class="card metric"><span>User Approved</span><strong>${registeredUsers().length}</strong></article>
     <article class="card metric"><span>Rata-rata Keseriusan</span><strong>${pct(avg)}</strong></article>
@@ -536,7 +559,7 @@ function dashboardView(){
   </div>
   <div class="grid ${showRules ? "two" : ""}" style="margin-top:18px">
     <section class="card">
-      <div class="kpi-title"><h2>Nilai Keseriusan Pengurus</h2><span class="badge ${countVery ? 'good':'bad'}">${countVery} Sangat Serius</span></div>
+      <div class="toolbar"><div class="kpi-title"><h2>Nilai Keseriusan Pengurus</h2><span class="badge ${countVery ? 'good':'bad'}">${countVery} Sangat Serius</span></div><div class="actions">${openFileButton}</div></div>
       ${rows.length ? `<div class="table-wrap">${summaryTable(rows, false)}</div>` : '<div class="empty">Belum ada user approved.</div>'}
     </section>
     ${showRules ? `<aside class="card">
@@ -547,6 +570,9 @@ function dashboardView(){
       <p><span class="badge good">Sangat Serius ≥85%</span></p><p><span class="badge info">Serius ≥70%</span></p><p><span class="badge mid">Perlu Ditingkatkan ≥50%</span></p><p><span class="badge bad">Belum Serius &lt;50%</span></p>
     </aside>` : ""}
   </div>`;
+}
+function bindDashboardView(){
+  bindOpenCashFlowButtons();
 }
 function profileView(){
   const acc = activeAccount();
@@ -681,22 +707,24 @@ async function bindInputView(){
       toast(error.message || "Upload bukti gagal.");
       return;
     }
-    setEvaluation({ evaluatorId: activeUser, targetId: selectedTarget, items, submittedAt: new Date().toISOString() });
-    toast("Checklist berhasil disimpan."); renderView();
+    const savedRemote = await setEvaluation({ evaluatorId: activeUser, targetId: selectedTarget, items, submittedAt: new Date().toISOString() });
+    toast(savedRemote ? "Checklist berhasil disimpan ke database." : "Checklist disimpan lokal. Sinkron database akan dicoba lagi.");
+    renderView();
   };
-  document.querySelector("#reset-current").onclick = () => {
-    if(confirm("Kosongkan penilaian Anda untuk pengurus ini?")){ delete state.evaluations[key(activeUser,selectedTarget)]; saveState(); renderView(); }
+  document.querySelector("#reset-current").onclick = async () => {
+    if(confirm("Kosongkan penilaian Anda untuk pengurus ini?")){ delete state.evaluations[key(activeUser,selectedTarget)]; await saveState({ immediate: true }); renderView(); }
   };
 }
 function evaluationsView(){
   const rows = allEvaluationRows().sort((a,b)=>(b.submittedAt||"").localeCompare(a.submittedAt||""));
-  return `<section class="card"><div class="toolbar"><div><h2>Data Penilaian Pembagian SHU</h2><p class="muted">Semua data bintang dari masing-masing pengurus dibaca otomatis untuk dashboard dan SHU.</p></div><button class="ghost" onclick="downloadJson()">Unduh Backup JSON</button></div>${rows.length?`<div class="table-wrap"><table><thead><tr><th>Evaluator</th><th>Dinilai</th><th>Tanggal</th><th>Ringkasan Nilai</th></tr></thead><tbody>${rows.map(ev=>evaluationRow(ev)).join("")}</tbody></table></div>`:'<div class="empty">Belum ada checklist yang disimpan.</div>'}</section>`;
+  return `<section class="card"><div class="toolbar"><div><h2>Hasil Penilaian</h2><p class="muted">User hanya melihat hasil penilaian tanpa identitas pemberi nilai.</p></div></div>${rows.length?`<div class="table-wrap"><table><thead><tr><th>Dinilai</th><th>Tanggal</th><th>Ringkasan Nilai</th></tr></thead><tbody>${rows.map(ev=>evaluationRow(ev, false)).join("")}</tbody></table></div>`:'<div class="empty">Belum ada checklist yang disimpan.</div>'}</section>`;
 }
-function evaluationRow(ev){
+function evaluationRow(ev, showEvaluator = true){
   const counts = {1:0,2:0,3:0,4:0,5:0};
   Object.values(ev.items||{}).forEach(a => { const rating = answerRating(a); if(counts[rating] !== undefined) counts[rating]++; });
   const proofCount = Object.values(ev.items||{}).filter(a => a.proof || a.proofFile).length;
-  return `<tr><td><strong>${safe(member(ev.evaluatorId)?.name)}</strong></td><td>${safe(member(ev.targetId)?.name)}</td><td>${ev.submittedAt ? new Date(ev.submittedAt).toLocaleString('id-ID') : '-'}</td><td>${[5,4,3,2,1].map(rate => `${ratingStars(rate)}: ${counts[rate]}`).join("<br>")}<br>Bukti: ${proofCount}</td></tr>`;
+  const resultCells = `<td>${safe(member(ev.targetId)?.name)}</td><td>${ev.submittedAt ? new Date(ev.submittedAt).toLocaleString('id-ID') : '-'}</td><td>${[5,4,3,2,1].map(rate => `${ratingStars(rate)}: ${counts[rate]}`).join("<br>")}<br>Bukti: ${proofCount}</td>`;
+  return showEvaluator ? `<tr><td><strong>${safe(member(ev.evaluatorId)?.name)}</strong></td>${resultCells}</tr>` : `<tr>${resultCells}</tr>`;
 }
 function shuView(){
   const rows = registeredShuRows();
@@ -729,7 +757,7 @@ function cashFlowView(){
       <div><h2>Arus Kas</h2><p class="muted">Import file XLSX laporan kas. Nilai Dashboard!H17 mengisi Total SHU, SHU!C11 mengisi persen pengurus, dan SHU!C9 mengisi persen anggota.</p></div>
       <div class="actions">
         <label class="primary file-action">Import XLSX<input id="cashflow-import" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" class="hidden"></label>
-        ${cashFlow?.fileDataUrl ? `<button id="open-cashflow-file" class="ghost" type="button">Buka File</button>` : ""}
+        ${cashFlow?.fileDataUrl ? `<button class="ghost open-cashflow-file" type="button">Buka File</button>` : ""}
       </div>
     </div>
     ${cashFlow ? `<div class="note">File: <strong>${safe(cashFlow.fileName)}</strong>${cashFlow.importedAt ? `, diimport ${new Date(cashFlow.importedAt).toLocaleString("id-ID")}` : ""}. Perubahan pada tabel di bawah disimpan ke aplikasi dan langsung memperbarui SHU jika menyentuh sel rujukan.</div>` : '<div class="empty">Belum ada file arus kas. Import file XLSX untuk menampilkan dan menyinkronkan data.</div>'}
@@ -778,18 +806,17 @@ function bindCashFlowView(){
       }
     };
   }
-  const openButton = document.querySelector("#open-cashflow-file");
-  if(openButton) openButton.onclick = openCashFlowFile;
+  bindOpenCashFlowButtons();
   const sheetSelect = document.querySelector("#cashflow-sheet");
   if(sheetSelect){
     sheetSelect.onchange = event => {
       state.cashFlow.selectedSheet = event.target.value;
-      saveState();
+      saveState({ immediate: true });
       renderView();
     };
   }
   document.querySelectorAll(".cash-cell").forEach(input => {
-    input.onchange = event => {
+    input.onchange = async event => {
       const sheet = selectedCashFlowSheet();
       if(!sheet) return;
       const row = Number(event.target.dataset.row);
@@ -798,34 +825,46 @@ function bindCashFlowView(){
       while(sheet.rows[row].length <= col) sheet.rows[row].push("");
       sheet.rows[row][col] = event.target.value;
       syncCashFlowShu();
-      saveState();
+      await saveState({ immediate: true });
       renderView();
     };
   });
 }
 async function importCashFlowFile(file){
   if(!/\.xlsx$/i.test(file.name)) throw new Error("File harus berformat .xlsx.");
-  if(file.size > CASHFLOW_MAX_FILE_SIZE) throw new Error("Ukuran file XLSX maksimal 6 MB.");
+  if(file.size > CASHFLOW_MAX_FILE_SIZE) throw new Error("Ukuran file XLSX maksimal 4 MB.");
   const buffer = await file.arrayBuffer();
   const sheets = await parseXlsxWorkbook(buffer);
   const fileDataUrl = await readFileAsDataUrl(file);
   state.cashFlow = { fileName: file.name, fileType: file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileDataUrl, importedAt: new Date().toISOString(), selectedSheet: sheets[0]?.name || "", sheets };
   syncCashFlowShu();
-  saveState();
+  await saveState({ immediate: true });
   toast("File arus kas berhasil diimport.");
   renderView();
 }
-function openCashFlowFile(){
+async function openCashFlowFile(){
   const cashFlow = state.cashFlow;
   if(!cashFlow?.fileDataUrl){ toast("File arus kas belum tersedia."); return; }
-  const a = document.createElement("a");
-  a.href = cashFlow.fileDataUrl;
-  a.download = cashFlow.fileName || "arus-kas.xlsx";
-  a.target = "_blank";
-  a.rel = "noopener";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  const url = `${CASHFLOW_FILE_URL}&t=${encodeURIComponent(cashFlow.importedAt || state.updatedAt || Date.now())}`;
+  if(navigator.canShare && navigator.share){
+    try {
+      const response = await fetch(url, { cache: "no-store" });
+      if(response.ok){
+        const blob = await response.blob();
+        const file = new File([blob], cashFlow.fileName || "arus-kas.xlsx", { type: blob.type || cashFlow.fileType || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+        if(navigator.canShare({ files: [file] })){
+          await navigator.share({ files: [file], title: file.name });
+          return;
+        }
+      }
+    } catch(error) {
+      if(error?.name === "AbortError") return;
+    }
+  }
+  window.open(url, "_blank", "noopener");
+}
+function bindOpenCashFlowButtons(){
+  document.querySelectorAll(".open-cashflow-file").forEach(button => button.onclick = openCashFlowFile);
 }
 function syncCashFlowShu(){
   const cashFlow = state.cashFlow;
@@ -971,6 +1010,27 @@ function columnName(index){
   }
   return name;
 }
+function adminEvaluationsView(){
+  const evaluations = allEvaluationRows().sort((a,b)=>(b.submittedAt||"").localeCompare(a.submittedAt||""));
+  const shuRows = registeredShuRows();
+  const distribution = normalizeShuDistribution(state.shuDistribution);
+  const assessedUsers = new Set(evaluations.map(ev => ev.targetId)).size;
+  const openFileButton = state.cashFlow?.fileDataUrl ? `<button class="ghost open-cashflow-file" type="button">Buka File Arus Kas</button>` : "";
+  return `<div class="grid cards">
+    <article class="card metric"><span>Aktivitas Penilaian</span><strong>${evaluations.length}</strong></article>
+    <article class="card metric"><span>User Dinilai</span><strong>${assessedUsers}</strong></article>
+    <article class="card metric"><span>Total SHU</span><strong>${rupiah(state.totalShu)}</strong></article>
+    <article class="card metric"><span>Pengurus / Anggota</span><strong>${pct(distribution.pengurus)} / ${pct(distribution.anggota)}</strong></article>
+  </div>
+  <section class="card" style="margin-top:18px">
+    <div class="toolbar"><div><h2>Aktivitas Penilaian User</h2><p class="muted">Admin dapat melihat siapa yang memberi penilaian, siapa yang dinilai, tanggal, dan ringkasan hasil.</p></div><div class="actions">${openFileButton}</div></div>
+    ${evaluations.length ? `<div class="table-wrap"><table><thead><tr><th>Evaluator</th><th>Dinilai</th><th>Tanggal</th><th>Ringkasan Nilai</th></tr></thead><tbody>${evaluations.map(ev => evaluationRow(ev, true)).join("")}</tbody></table></div>` : '<div class="empty">Belum ada aktivitas penilaian.</div>'}
+  </section>
+  <section class="card" style="margin-top:18px">
+    <div class="toolbar"><div><h2>Data Pembagian SHU Semua User</h2><p class="muted">Tabel ini memakai data user approved, total SHU, persentase arus kas, dan hasil penilaian terbaru.</p></div><button class="ghost" onclick="window.print()">Cetak</button></div>
+    ${shuRows.length ? `<div class="table-wrap">${summaryTable(shuRows, true)}</div>` : '<div class="empty">Belum ada user approved untuk pembagian SHU.</div>'}
+  </section>`;
+}
 function adminView(){
   const requests = state.signupRequests || [];
   const passwordRequests = state.passwordRequests || [];
@@ -978,12 +1038,14 @@ function adminView(){
   const pendingPassword = passwordRequests.filter(req => req.status === "pending");
   const approved = visibleAccounts().filter(acc => acc.status === "approved");
   const rejected = requests.filter(req => req.status === "rejected");
+  const openFileButton = state.cashFlow?.fileDataUrl ? `<button class="ghost open-cashflow-file" type="button">Buka File Arus Kas</button>` : "";
   return `<div class="grid cards">
     <article class="card metric"><span>Request Pending</span><strong>${pending.length}</strong></article>
     <article class="card metric"><span>Ganti Password</span><strong>${pendingPassword.length}</strong></article>
     <article class="card metric"><span>Akun Approved</span><strong>${approved.length}</strong></article>
     <article class="card metric"><span>Request Rejected</span><strong>${rejected.length}</strong></article>
   </div>
+  ${openFileButton ? `<section class="card" style="margin-top:18px"><div class="actions">${openFileButton}</div></section>` : ""}
   <section class="card" style="margin-top:18px">
     <div class="toolbar"><div><h2>Verifikasi Pengguna Baru</h2><p class="muted">Approve untuk mengaktifkan akun. Reject untuk menolak request sign up.</p></div></div>
     ${pending.length ? `<div class="table-wrap"><table><thead><tr><th>Akses</th><th>Data Diri</th><th>Catatan</th><th>Tanggal</th><th>Aksi</th></tr></thead><tbody>${pending.map(req => requestRow(req, true)).join("")}</tbody></table></div>` : '<div class="empty">Tidak ada request pending.</div>'}
@@ -1056,6 +1118,7 @@ function statusBadge(status){
   return `<span class="badge ${classes[status] || "info"}">${labels[status] || safe(status)}</span>`;
 }
 function bindAdminView(){
+  bindOpenCashFlowButtons();
   document.querySelectorAll(".approve-request").forEach(btn => btn.onclick = () => decideSignup(btn.dataset.request, "approved"));
   document.querySelectorAll(".reject-request").forEach(btn => btn.onclick = () => decideSignup(btn.dataset.request, "rejected"));
   document.querySelectorAll(".approve-password-request").forEach(btn => btn.onclick = () => decidePasswordRequest(btn.dataset.request, "approved"));
@@ -1156,17 +1219,14 @@ function settingsView(){
   const pendingPassword = (state.passwordRequests || []).filter(req => req.accountId === activeUser && req.status === "pending").length;
   const passwordPanel = isAdmin() ? "" : `<section class="card" style="margin-top:18px"><h2>Ajukan Ganti Password</h2><p class="muted">Password baru akan aktif setelah admin melakukan approval.</p>${pendingPassword ? `<div class="note">Ada ${pendingPassword} request ganti password yang masih menunggu approval admin.</div>` : ""}<form id="password-change-form" class="stack" style="margin-top:14px"><label>Password Baru<span class="password-wrap"><input id="new-password" type="password" autocomplete="new-password" minlength="6" placeholder="Minimal 6 karakter" required /><button id="toggle-new-password" class="icon-btn" type="button" aria-label="Lihat password baru">Lihat</button></span></label><label>Catatan untuk Admin<textarea id="password-change-note" placeholder="Contoh: mohon approve ganti password saya."></textarea></label><button class="primary" type="submit">Ajukan Ganti Password</button><p id="password-change-message" class="success hidden"></p><p id="password-change-error" class="error hidden"></p></form></section>`;
   const adminUserPanel = isAdmin() ? userManagementSection() : "";
-  return `<section class="card"><h2>Pengaturan & Backup</h2><div class="grid two"><div><h3>Data Database</h3><p class="muted">Data disimpan ke MySQL melalui <code>api.php</code>, dengan salinan cadangan di browser jika koneksi database belum tersedia.</p><div class="actions"><button id="export-json" class="primary">Unduh Backup JSON</button><label class="ghost" style="display:inline-flex;align-items:center;gap:8px">Impor JSON<input id="import-json" type="file" accept="application/json" class="hidden"></label><button id="clear-data" class="danger">Hapus Semua Data</button></div></div><div><h3>Akun Aktif</h3><div class="user-cell settings-user">${accountAvatar(acc, true)}<p><strong>${safe(acc?.name || "-")}</strong><br><span class="muted">${safe(acc?.role || "-")}</span></p></div><p class="muted">Pengurus dan anggota dibuat melalui sign up, lalu diverifikasi admin.</p><p class="muted">Status sinkron database: ${remoteReady ? "aktif" : "menunggu koneksi API"}.</p></div></div></section>${adminUserPanel}${passwordPanel}`;
+  const openFileButton = state.cashFlow?.fileDataUrl ? `<button class="ghost open-cashflow-file" type="button">Buka File Arus Kas</button>` : "";
+  return `<section class="card"><h2>Pengaturan</h2><div class="grid two"><div><h3>Data Database</h3><p class="muted">Data disimpan ke MySQL melalui <code>api.php</code>, dengan salinan cadangan di browser jika koneksi database belum tersedia.</p><div class="actions">${openFileButton}<button id="clear-data" class="danger">Hapus Semua Data</button></div></div><div><h3>Akun Aktif</h3><div class="user-cell settings-user">${accountAvatar(acc, true)}<p><strong>${safe(acc?.name || "-")}</strong><br><span class="muted">${safe(acc?.role || "-")}</span></p></div><p class="muted">Pengurus dan anggota dibuat melalui sign up, lalu diverifikasi admin.</p><p class="muted">Status sinkron database: ${remoteReady ? "aktif" : "menunggu koneksi API"}.</p></div></div></section>${adminUserPanel}${passwordPanel}`;
 }
 function bindSettingsView(){
-  document.querySelector("#export-json").onclick = downloadJson;
   if(isAdmin()) bindUserManagementControls();
   bindPasswordPanel();
+  bindOpenCashFlowButtons();
   document.querySelector("#clear-data").onclick = () => { if(confirm("Hapus semua data penilaian, akun, request sign up, request ganti password, arus kas, dan total SHU di browser ini?")){ state = { evaluations:{}, totalShu:0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt:null}; saveState(); toast("Data dihapus."); renderView(); } };
-  document.querySelector("#import-json").onchange = (e) => {
-    const file = e.target.files[0]; if(!file) return;
-    const reader = new FileReader(); reader.onload = () => { try { const data = cleanLegacyFields(JSON.parse(reader.result)); state = normalizeState({ evaluations: data.evaluations || {}, totalShu: Number(data.totalShu||0), shuDistribution: data.shuDistribution || defaultShuDistribution(), cashFlow: data.cashFlow || null, accounts: { ...defaultAccounts(), ...(data.accounts || {}) }, signupRequests: data.signupRequests || [], passwordRequests: data.passwordRequests || [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt: data.updatedAt || new Date().toISOString() }); saveState(); toast("Backup berhasil diimpor."); renderView(); } catch { toast("File JSON tidak valid."); } }; reader.readAsText(file);
-  };
 }
 function bindPasswordPanel(){
   const passwordForm = document.querySelector("#password-change-form");
@@ -1219,11 +1279,9 @@ function bindPasswordPanel(){
     };
   }
 }
-function downloadJson(){
-  const blob = new Blob([JSON.stringify(state,null,2)], {type:"application/json"});
-  const url = URL.createObjectURL(blob); const a = document.createElement("a");
-  a.href = url; a.download = `backup-checklist-shu-${new Date().toISOString().slice(0,10)}.json`; a.click(); URL.revokeObjectURL(url);
-}
 render();
 setupInstallPrompt();
 pullRemoteState();
+setInterval(() => {
+  if(activeUser && isAdmin() && activeTab === "admin-evaluations") pullRemoteState();
+}, 15000);

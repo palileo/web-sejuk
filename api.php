@@ -24,13 +24,62 @@ function ensure_state_table(): void
     ");
 }
 
+function load_state_row(): ?array
+{
+    $stmt = db()->prepare('SELECT state_json, updated_at FROM app_state WHERE state_key = ? LIMIT 1');
+    $stmt->execute([APP_STATE_KEY]);
+    $row = $stmt->fetch();
+    return $row ?: null;
+}
+
+function safe_download_name(string $name): string
+{
+    $name = trim(preg_replace('/[^A-Za-z0-9._ -]+/', '_', $name) ?: '');
+    if ($name === '' || substr(strtolower($name), -5) !== '.xlsx') {
+        return 'arus-kas.xlsx';
+    }
+    return $name;
+}
+
+function cashflow_file_response(): void
+{
+    $row = load_state_row();
+    $state = $row ? json_decode((string) $row['state_json'], true) : null;
+    $cashFlow = is_array($state['cashFlow'] ?? null) ? $state['cashFlow'] : null;
+    $dataUrl = is_string($cashFlow['fileDataUrl'] ?? null) ? $cashFlow['fileDataUrl'] : '';
+
+    if ($dataUrl === '' || !preg_match('/^data:([^;,]+)?;base64,(.+)$/', $dataUrl, $match)) {
+        json_response(['ok' => false, 'error' => 'File arus kas belum tersedia.'], 404);
+    }
+
+    $mime = $match[1] ?: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    if ($mime !== 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
+        $mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    }
+
+    $binary = base64_decode($match[2], true);
+    if ($binary === false) {
+        json_response(['ok' => false, 'error' => 'File arus kas tidak valid.'], 422);
+    }
+
+    $fileName = safe_download_name((string) ($cashFlow['fileName'] ?? 'arus-kas.xlsx'));
+    header('Content-Type: ' . $mime);
+    header('Content-Length: ' . strlen($binary));
+    header('Content-Disposition: inline; filename="' . str_replace('"', '', $fileName) . '"');
+    header('Cache-Control: no-store, max-age=0');
+    echo $binary;
+    exit;
+}
+
 try {
     ensure_state_table();
 
     if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-        $stmt = db()->prepare('SELECT state_json, updated_at FROM app_state WHERE state_key = ? LIMIT 1');
-        $stmt->execute([APP_STATE_KEY]);
-        $row = $stmt->fetch();
+        if (($_GET['action'] ?? '') === 'cashflow-file') {
+            cashflow_file_response();
+        }
+
+        $row = load_state_row();
         json_response([
             'ok' => true,
             'state' => $row ? json_decode((string) $row['state_json'], true) : null,

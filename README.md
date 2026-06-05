@@ -18,9 +18,9 @@ Aplikasi web statis responsif untuk checklist kinerja pengurus koperasi dan simu
 - Dashboard profil user lengkap dengan data diri dan foto profil WebP.
 - Penyimpanan data tersinkron ke MySQL melalui `api.php`, dengan fallback `localStorage`.
 - Bisa diinstal dari browser sebagai aplikasi/PWA melalui tombol **Instal App**.
-- Backup/restore data JSON.
 - Sign up pengguna baru dengan antrean verifikasi admin.
 - Dashboard admin untuk approve/reject pengguna baru.
+- Tab admin **Penilaian** untuk melihat semua aktivitas penilaian user dan data pembagian SHU semua user.
 - Manajemen user admin untuk edit dan hapus akun.
 - Admin dapat mengubah password user melalui manajemen user.
 - Form sign up berisi data diri: nama, alamat, tanggal lahir, dan nomor WA.
@@ -41,9 +41,11 @@ Role **Anggota** melihat dashboard, profil, dan panel pembagian SHU. Panel pemba
 
 Panel **Isi Checklist** dan **Data Penilaian** hanya memakai data user pengurus yang sudah sign up dan di-approve admin.
 
+User biasa hanya melihat hasil penilaian tanpa identitas pemberi nilai. Identitas evaluator hanya tampil untuk admin pada tab **Penilaian**.
+
 Panel **Pengaturan** hanya ditampilkan untuk admin.
 
-Panel **Arus Kas** hanya ditampilkan untuk admin. File `.xlsx` yang diimport disimpan ke data aplikasi bersama hasil pembacaan sheet, sehingga bisa tampil lagi setelah sinkron ke database. Ukuran file import dibatasi maksimal 6 MB agar backup dan sinkronisasi tetap stabil.
+Panel **Arus Kas** hanya ditampilkan untuk admin. File `.xlsx` yang diimport disimpan ke database hosting bersama hasil pembacaan sheet, sehingga bisa tampil lagi setelah sinkron ke database. Ukuran file import dibatasi maksimal 4 MB agar sinkronisasi tetap stabil di shared hosting. Tombol **Buka File Arus Kas** mengambil file dari endpoint database hosting dan tersedia di dashboard user saat file sudah diimport.
 
 ## Cara Menjalankan Lokal
 
@@ -88,7 +90,7 @@ Data database yang disiapkan untuk versi backend:
 - User database: `indoseju_mak`
 - Folder domain: `indoseju/mak.indosejuk.my.id`
 
-Versi ini menyimpan data ke tabel `app_state` di MySQL melalui `api.php`. Browser tetap menyimpan salinan lokal sebagai fallback jika koneksi database sedang gagal.
+Versi ini menyimpan data penilaian, akun, request, total SHU, persentase SHU, dan file arus kas ke tabel `app_state` di MySQL melalui `api.php`. Browser tetap menyimpan salinan lokal sebagai fallback jika koneksi database sedang gagal.
 
 File `.htaccess` sudah disiapkan untuk:
 
