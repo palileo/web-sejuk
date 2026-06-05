@@ -1,26 +1,38 @@
 const STORAGE_KEY = "koperasi_checklist_shu_v1";
 const SESSION_KEY = "koperasi_active_user_v1";
 const AUTH_SCHEMA_VERSION = 2;
-const API_URL = "api.php";
+const API_URL = "api.php"; // Pastikan path ini benar
 const CASHFLOW_FILE_URL = `${API_URL}?action=cashflow-file`;
 const CASHFLOW_MAX_FILE_SIZE = 4 * 1024 * 1024;
 const app = document.querySelector("#app");
+
+const ADMIN_ACCOUNT = { id: "admin", name: "Admin Indosejuk", role: "Administrator", password: "admin123" };
+const RATINGS = [
+    { value: 1, label: "1 Bintang", score: 20 },
+    { value: 2, label: "2 Bintang", score: 40 },
+    { value: 3, label: "3 Bintang", score: 60 },
+    { value: 4, label: "4 Bintang", score: 80 },
+    { value: 5, label: "5 Bintang", score: 100 }
+];
+
+let APP_CONFIG = {
+  admin: ADMIN_ACCOUNT,
+  ratings: RATINGS,
+  members: [], // Akan diisi dari API
+  checklists: {} // Akan diisi dari API
+};
+
 let state = loadState();
 let activeUser = sessionStorage.getItem(SESSION_KEY);
 let activeTab = "dashboard";
-let selectedTarget = APP_DATA.members.find(m => m.id !== activeUser)?.id || APP_DATA.members[0].id;
+let selectedTarget = null; // Akan di-set setelah data dimuat
 let editingUserId = null;
 let remoteSaveTimer = null;
 let remoteReady = false;
 let deferredInstallPrompt = null;
 let needsRender = false;
 
-function defaultAccounts(){
-  const admin = APP_DATA.admin;
-  return {
-    [admin.id]: { id: admin.id, memberId: null, name: admin.name, role: admin.role, password: admin.password, type: "admin", status: "approved", createdAt: new Date().toISOString(), approvedAt: new Date().toISOString() }
-  };
-}
+function defaultAccounts(){ return { [ADMIN_ACCOUNT.id]: { id: ADMIN_ACCOUNT.id, memberId: null, name: ADMIN_ACCOUNT.name, role: ADMIN_ACCOUNT.role, password: ADMIN_ACCOUNT.password, type: "admin", status: "approved", createdAt: new Date().toISOString(), approvedAt: new Date().toISOString() } }; }
 function loadState(){
   const fallback = { evaluations: {}, totalShu: 0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt: null };
   try {
@@ -48,7 +60,7 @@ function saveState(options = {}){
 function normalizeState(data){
   const fallback = { evaluations: {}, totalShu: 0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt: null };
   const clean = cleanLegacyFields(data || {});
-  const admin = APP_DATA.admin;
+  const admin = ADMIN_ACCOUNT;
   const savedAdmin = clean.accounts?.[admin.id] || {};
   return {
     ...fallback,
@@ -187,10 +199,25 @@ function cleanLegacyFields(value){
   }
   return value;
 }
-function member(id){ return APP_DATA.members.find(m => m.id === id); }
+function getRoleData(roleId){ return APP_CONFIG.members.find(r => r.id === roleId); }
+function getEvaluatableMembers() {
+    return Object.values(state.accounts)
+        .filter(acc => acc.status === 'approved' && acc.type === 'member' && acc.role !== 'Anggota')
+        .map(acc => {
+            const roleData = getRoleData(acc.memberId);
+            return {
+                id: acc.id,
+                name: acc.name,
+                role: acc.role,
+                focus: roleData?.focus || '',
+                memberId: acc.memberId
+            };
+        });
+}
+function getMemberData(accountId) { return getEvaluatableMembers().find(m => m.id === accountId); }
 function signupRoles(){
   return [
-    ...APP_DATA.members.map(m => ({ id: m.id, label: m.role, name: m.role, role: m.role, type: "member" })),
+    ...APP_CONFIG.members.map(r => ({ id: r.id, label: r.role, name: r.role, role: r.role, type: "member" })),
     { id: "anggota", label: "Anggota", name: "Anggota", role: "Anggota", type: "general" }
   ];
 }
@@ -198,10 +225,7 @@ function signupRole(id){ return signupRoles().find(role => role.id === id); }
 function account(id){ return state.accounts?.[id]; }
 function activeAccount(){ return account(activeUser); }
 function isAdmin(){ return activeAccount()?.type === "admin"; }
-function isChecklistMember(id){
-  const acc = account(id);
-  return Boolean(acc?.memberId && member(acc.memberId) && acc.role !== "Anggota" && acc.status === "approved");
-}
+function isChecklistMember(id){ const acc = account(id); return Boolean(acc?.memberId && getRoleData(acc.memberId) && acc.role !== "Anggota" && acc.status === "approved"); }
 function accountLabel(acc){
   if(!acc) return "-";
   return `${acc.name} (${acc.role})`;
@@ -237,7 +261,7 @@ function extraSignupNote(text){
 }
 function rupiah(value){ return new Intl.NumberFormat("id-ID",{style:"currency",currency:"IDR",maximumFractionDigits:0}).format(Number(value||0)); }
 function rupiahInput(value){ return Number(value || 0).toLocaleString("id-ID"); }
-function parseRupiah(value){ return Number(String(value || "").replace(/[^\d]/g, "")) || 0; }
+function parseRupiah(value){ return Number(String(value || "").replace(/[^\d,]/g, "").replace(",", ".")) || 0; }
 function pct(value){ return `${Math.round((value||0)*100)}%`; }
 function normalizePercentValue(value, fallback = 0){
   if(value === null || value === undefined || value === "") return fallback;
@@ -265,7 +289,7 @@ function parseSpreadsheetMoney(value){
 }
 function safe(text){ return String(text ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch])); }
 function key(evaluatorId, targetId){ return `${evaluatorId}__${targetId}`; }
-function ratingOptions(){ return APP_DATA.ratings || []; }
+function ratingOptions(){ return RATINGS || []; }
 function legacyStatusScore(status){
   const legacy = { "Belum Dikerjakan": 0, "Dalam Proses": 50, "Selesai": 100, "Tidak Relevan": null };
   return Object.prototype.hasOwnProperty.call(legacy, status) ? legacy[status] : undefined;
@@ -299,14 +323,15 @@ function setEvaluation(evaluation){
   state.evaluations[key(evaluation.evaluatorId,evaluation.targetId)] = evaluation;
   saveState();
 }
-function allEvaluationRows(){
-  const approvedIds = new Set(approvedChecklistAccounts().map(acc => acc.memberId));
-  return Object.values(state.evaluations || {}).filter(e => e && e.evaluatorId !== e.targetId && approvedIds.has(e.evaluatorId) && approvedIds.has(e.targetId));
-}
-function calculateTarget(targetId){
-  const items = APP_DATA.checklists[targetId];
+function allEvaluationRows(){ return Object.values(state.evaluations || {}).filter(e => e && e.evaluatorId !== e.targetId); }
+function calculateTarget(targetId, roleId){
+  const items = APP_CONFIG.checklists[roleId];
+  if (!items) {
+    return { targetId, evaluatorCount: 0, totalAnswers: 0, assessedWeight: 0, scoreWeight: 0, seriousness: 0, category: "Belum Serius", completed: 0, progress: 0, pending: 0 };
+  }
   const rows = allEvaluationRows().filter(e => e.targetId === targetId);
   let scoreWeight = 0, assessedWeight = 0, completed = 0, progress = 0, pending = 0, totalAnswers = 0;
+  const evaluatableMembers = getEvaluatableMembers();
   rows.forEach(ev => {
     items.forEach(item => {
       const answer = ev.items[item.no] || {};
@@ -323,28 +348,28 @@ function calculateTarget(targetId){
   return { targetId, evaluatorCount: rows.length, totalAnswers, assessedWeight, scoreWeight, seriousness, category: category(seriousness), completed, progress, pending };
 }
 function summary(){
-  const rows = APP_DATA.members.map(m => ({...calculateTarget(m.id), member:m}));
+  const rows = getEvaluatableMembers().map(m => ({...calculateTarget(m.id, m.memberId), member:m}));
   const totalSeriousness = rows.reduce((a,r)=>a+r.seriousness,0);
   const distribution = normalizeShuDistribution(state.shuDistribution);
   return rows.map(r => {
-    const pengurusPct = totalSeriousness === 0 ? 0 : (r.seriousness / totalSeriousness) * distribution.pengurus;
+    const pengurusPct = totalSeriousness === 0 ? (r.seriousness > 0 ? distribution.pengurus / rows.length : 0) : (r.seriousness / totalSeriousness) * distribution.pengurus;
     return {...r, shuPct: pengurusPct, shuNominal: (state.totalShu||0) * pengurusPct};
   });
 }
 function registeredUsers(){
-  return Object.values(state.accounts || {}).filter(acc => acc.id !== APP_DATA.admin.id && acc.status === "approved");
+  return Object.values(state.accounts || {}).filter(acc => acc.id !== ADMIN_ACCOUNT.id && acc.status === "approved");
 }
 function registeredShuRows(){
-  const baseRows = summary();
-  const baseByMember = Object.fromEntries(baseRows.map(row => [row.member.id, row]));
   const users = registeredUsers();
-  const nonMembers = users.filter(acc => acc.role !== "Anggota" && acc.memberId && baseByMember[acc.memberId]);
-  const anggota = users.filter(acc => acc.role === "Anggota" || !acc.memberId);
-  const nonMemberRows = nonMembers.map(acc => {
-    const base = baseByMember[acc.memberId];
+  const pengurusUsers = users.filter(acc => acc.role !== "Anggota" && acc.memberId);
+  const anggota = users.filter(acc => acc.role === "Anggota");
+  const totalSeriousness = pengurusUsers.reduce((sum, acc) => sum + (calculateTarget(acc.id, acc.memberId).seriousness || 0), 0);
+  const distribution = normalizeShuDistribution(state.shuDistribution);
+  const nonMemberRows = pengurusUsers.map(acc => {
+    const base = calculateTarget(acc.id, acc.memberId);
+    base.shuPct = totalSeriousness > 0 ? (base.seriousness / totalSeriousness) * distribution.pengurus : (pengurusUsers.length > 0 ? distribution.pengurus / pengurusUsers.length : 0);
     return { ...base, member: { id: acc.id, name: acc.name, role: acc.role }, account: acc, shuPct: base.shuPct || 0, shuNominal: (state.totalShu || 0) * (base.shuPct || 0) };
   });
-  const distribution = normalizeShuDistribution(state.shuDistribution);
   const anggotaPct = anggota.length ? distribution.anggota / anggota.length : 0;
   const anggotaRows = anggota.map(acc => ({ targetId: acc.id, member: { id: acc.id, name: acc.name, role: "Anggota" }, account: acc, evaluatorCount: 0, seriousness: 0, category: "Anggota", completed: 0, progress: 0, pending: 0, shuPct: anggotaPct, shuNominal: (state.totalShu || 0) * anggotaPct }));
   return [...nonMemberRows, ...anggotaRows];
@@ -352,9 +377,7 @@ function registeredShuRows(){
 function registeredDashboardRows(){
   return registeredShuRows().map(row => ({ ...row, shuPct: row.shuPct || 0, shuNominal: row.shuNominal || 0 }));
 }
-function approvedChecklistAccounts(){
-  return registeredUsers().filter(acc => acc.memberId && member(acc.memberId) && acc.role !== "Anggota");
-}
+function approvedChecklistAccounts(){ return registeredUsers().filter(acc => acc.memberId && getRoleData(acc.memberId) && acc.role !== "Anggota"); }
 function toast(message){
   const el = document.createElement("div"); el.className = "toast"; el.textContent = message; document.body.appendChild(el);
   setTimeout(()=>el.remove(),2200);
@@ -401,8 +424,8 @@ async function installApp(){
   toast("Buka menu browser, lalu pilih Tambahkan ke layar utama.");
 }
 
-function render(){
-  if(activeUser === APP_DATA.admin.id && !canShowAdminLogin()){
+async function render(){
+  if(activeUser === ADMIN_ACCOUNT.id && !canShowAdminLogin()){
     sessionStorage.removeItem(SESSION_KEY);
     activeUser = null;
     activeTab = "dashboard";
@@ -437,7 +460,7 @@ function renderLogin(){
       showLoginError("Pilih akun terlebih dahulu.");
       return;
     }
-    if(id === APP_DATA.admin.id && !canShowAdminLogin()){
+    if(id === ADMIN_ACCOUNT.id && !canShowAdminLogin()){
       showLoginError("Akun admin hanya bisa login dari halaman /admin di browser.");
       return;
     }
@@ -464,7 +487,7 @@ function renderLogin(){
       showLoginError("Akun ditolak admin. Hubungi admin untuk pemeriksaan ulang.");
       return;
     }
-    activeUser = id; sessionStorage.setItem(SESSION_KEY,id); selectedTarget = APP_DATA.members.find(m => m.id !== activeUser)?.id; activeTab = isAdmin() ? "admin" : "dashboard"; render();
+    activeUser = id; sessionStorage.setItem(SESSION_KEY,id); activeTab = isAdmin() ? "admin" : "dashboard"; render();
   });
   document.querySelector("#signup-form").addEventListener("submit", e => {
     e.preventDefault();
@@ -486,28 +509,27 @@ function renderLogin(){
       showSignupError("Request untuk akses ini masih menunggu keputusan admin.");
       return;
     }
-    const accountId = memberId === "anggota" ? `anggota_${Date.now()}` : memberId;
+    const baseId = (profile.nama || 'user').split(' ')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+    const accountId = `${baseId}_${Date.now()}`;
     state.signupRequests.unshift({ id: `req_${Date.now()}`, accountId, memberId: memberId === "anggota" ? null : memberId, name: profile.nama, role: selected.role, password, note, profile, status: "pending", requestedAt: new Date().toISOString(), decidedAt: null, decidedBy: null });
     saveState();
     document.querySelector("#signup-error").classList.add("hidden");
     document.querySelector("#signup-message").textContent = "Sign up terkirim. Tunggu admin melakukan approval sebelum login.";
     document.querySelector("#signup-message").classList.remove("hidden");
+    e.target.reset();
+    document.querySelector("#signup-note").value = personalInfoTemplate();
   });
 }
 function loginOptions(){
-  const admin = APP_DATA.admin;
+  const admin = ADMIN_ACCOUNT;
   const emptyOption = `<option value="" selected disabled>Pilih akun</option>`;
   const adminOption = canShowAdminLogin() ? `<option value="${admin.id}">${admin.name} — ${admin.role}</option>` : "";
   if(canShowAdminLogin()) return `${emptyOption}${adminOption}`;
-  const extraOptions = Object.values(state.accounts || {})
-    .filter(acc => acc.status === "approved" && acc.id !== APP_DATA.admin.id && !member(acc.id))
-    .map(acc => `<option value="${acc.id}">${safe(acc.name)} — ${safe(acc.role)}</option>`)
-    .join("");
   const approvedMemberOptions = Object.values(state.accounts || {})
-    .filter(acc => acc.status === "approved" && acc.id !== APP_DATA.admin.id && member(acc.id))
+    .filter(acc => acc.status === "approved" && acc.id !== ADMIN_ACCOUNT.id)
     .map(acc => `<option value="${acc.id}">${safe(acc.name)} — ${safe(acc.role)}</option>`)
     .join("");
-  return `${emptyOption}${adminOption}${approvedMemberOptions}${extraOptions}`;
+  return `${emptyOption}${adminOption}${approvedMemberOptions}`;
 }
 function bindPasswordToggle(inputSelector, buttonSelector){
   document.querySelector(buttonSelector).addEventListener("click", () => {
@@ -536,6 +558,11 @@ function switchAuthPanel(panel){
   document.querySelector(".login-heading h1").textContent = titles[panel] || titles.login;
 }
 function renderShell(){
+  if (!selectedTarget) {
+    const members = getEvaluatableMembers();
+    selectedTarget = members.find(m => m.id !== activeUser)?.id || members[0]?.id;
+  }
+
   app.innerHTML = document.querySelector("#shell-template").innerHTML;
   document.querySelector("#active-user").textContent = accountLabel(activeAccount());
   refreshInstallButton();
@@ -655,23 +682,24 @@ function bindProfileView(){
 }
 function summaryTable(rows, withShu){
   return `<table><thead><tr><th>Nama</th><th>Jabatan</th><th>Evaluator</th><th>Nilai</th><th>Kategori</th>${withShu?'<th>Persentase SHU</th><th>Nominal SHU</th>':''}<th>Progress</th></tr></thead><tbody>${rows.map(r=>`
-    <tr><td><strong>${safe(r.member.name)}</strong></td><td>${safe(r.member.role)}</td><td>${r.evaluatorCount}/${APP_DATA.members.length-1}</td><td><strong>${pct(r.seriousness)}</strong></td><td><span class="badge ${badgeClass(r.category)}">${r.category}</span></td>${withShu?`<td>${pct(r.shuPct)}</td><td class="currency">${rupiah(r.shuNominal)}</td>`:''}<td><div class="progress"><i style="width:${Math.round(r.seriousness*100)}%"></i></div></td></tr>`).join("")}</tbody></table>`;
+    <tr><td><strong>${safe(r.member.name)}</strong></td><td>${safe(r.member.role)}</td><td>${r.evaluatorCount}/${Math.max(0, getEvaluatableMembers().length - 1)}</td><td><strong>${pct(r.seriousness)}</strong></td><td><span class="badge ${badgeClass(r.category)}">${r.category}</span></td>${withShu?`<td>${pct(r.shuPct)}</td><td class="currency">${rupiah(r.shuNominal)}</td>`:''}<td><div class="progress"><i style="width:${Math.round(r.seriousness*100)}%"></i></div></td></tr>`).join("")}</tbody></table>`;
 }
 function inputView(){
   if(!isChecklistMember(activeUser)) return `<section class="card"><h2>Akses Anggota</h2><p class="muted">Akun anggota tidak memiliki akses pengisian checklist pengurus.</p></section>`;
-  const targets = approvedChecklistAccounts().filter(acc => acc.memberId !== activeUser);
-  if(!targets.find(t => t.memberId === selectedTarget)) selectedTarget = targets[0]?.memberId;
+  const targets = approvedChecklistAccounts().filter(acc => acc.id !== activeUser);
+  if(!targets.find(t => t.id === selectedTarget)) selectedTarget = targets[0]?.id;
   if(!targets.length) return `<section class="card"><h2>Isi Checklist Pengurus Lain</h2><div class="empty">Belum ada user pengurus approved lain untuk dinilai.</div></section>`;
-  const target = member(selectedTarget);
-  const ev = getEvaluation(activeUser, selectedTarget);
-  const items = APP_DATA.checklists[selectedTarget];
+  const targetAccount = account(selectedTarget);
+  const roleData = getRoleData(targetAccount.memberId);
+  const ev = getEvaluation(activeUser, targetAccount.id);
+  const items = APP_CONFIG.checklists[targetAccount.memberId];
   return `<section class="card">
     <h2>Isi Checklist Pengurus Lain</h2>
     <p class="muted">Login sebagai <strong>${safe(activeAccount().name)}</strong>. Target penilaian hanya user pengurus yang sudah approved admin.</p>
-    <div class="member-picker">${targets.map(acc => `<button class="member-card ${acc.memberId===selectedTarget?'active':''}" data-target="${acc.memberId}"><strong>${safe(acc.name)}</strong><br><span class="muted">${safe(acc.role)}</span></button>`).join("")}</div>
+    <div class="member-picker">${targets.map(acc => `<button class="member-card ${acc.id===selectedTarget?'active':''}" data-target="${acc.id}"><strong>${safe(acc.name)}</strong><br><span class="muted">${safe(acc.role)}</span></button>`).join("")}</div>
   </section>
   <section class="card" style="margin-top:18px">
-    <div class="toolbar"><div><h2>Checklist: ${safe(target.name)}</h2><p class="muted">${safe(target.role)} | Fokus: ${safe(target.focus)}</p></div><div class="actions"><button id="save-checklist" class="primary">Simpan Checklist</button><button id="reset-current" class="ghost">Kosongkan Form Ini</button></div></div>
+    <div class="toolbar"><div><h2>Checklist: ${safe(targetAccount.name)}</h2><p class="muted">${safe(targetAccount.role)} | Fokus: ${safe(roleData?.focus)}</p></div><div class="actions"><button id="save-checklist" class="primary">Simpan Checklist</button><button id="reset-current" class="ghost">Kosongkan Form Ini</button></div></div>
     <form id="checklist-form" class="checklist-form">${items.map(item => {
       const ans = ev.items[item.no] || {};
       const rating = answerRating(ans);
@@ -715,11 +743,12 @@ async function bindInputView(){
   document.querySelectorAll(".member-card:not([disabled])").forEach(btn => btn.onclick = () => { selectedTarget = btn.dataset.target; renderView(); });
   document.querySelector("#save-checklist").onclick = async () => {
     if(activeUser === selectedTarget){ toast("Pengurus tidak boleh menilai diri sendiri."); return; }
+    const targetMember = getMemberData(selectedTarget);
     const form = document.querySelector("#checklist-form");
     const items = {};
     const current = getEvaluation(activeUser, selectedTarget);
     try {
-      for(const item of APP_DATA.checklists[selectedTarget]){
+      for(const item of APP_CONFIG.checklists[targetMember.memberId]){
         const existing = current.items[item.no] || {};
         const file = form[`file-${item.no}`].files[0] || form[`camera-${item.no}`].files[0];
         const proofFile = file ? await convertImageToWebp(file) : existing.proofFile || null;
@@ -744,11 +773,13 @@ function evaluationsView(){
   return `<section class="card"><div class="toolbar"><div><h2>Hasil Penilaian</h2><p class="muted">User hanya melihat hasil penilaian tanpa identitas pemberi nilai.</p></div></div>${rows.length?`<div class="table-wrap"><table><thead><tr><th>Dinilai</th><th>Tanggal</th><th>Ringkasan Nilai</th></tr></thead><tbody>${rows.map(ev=>evaluationRow(ev, false)).join("")}</tbody></table></div>`:'<div class="empty">Belum ada checklist yang disimpan.</div>'}</section>`;
 }
 function evaluationRow(ev, showEvaluator = true){
+  const targetAccount = account(ev.targetId);
+  const evaluatorAccount = account(ev.evaluatorId);
   const counts = {1:0,2:0,3:0,4:0,5:0};
   Object.values(ev.items||{}).forEach(a => { const rating = answerRating(a); if(counts[rating] !== undefined) counts[rating]++; });
   const proofCount = Object.values(ev.items||{}).filter(a => a.proof || a.proofFile).length;
-  const resultCells = `<td>${safe(member(ev.targetId)?.name)}</td><td>${ev.submittedAt ? new Date(ev.submittedAt).toLocaleString('id-ID') : '-'}</td><td>${[5,4,3,2,1].map(rate => `${ratingStars(rate)}: ${counts[rate]}`).join("<br>")}<br>Bukti: ${proofCount}</td>`;
-  return showEvaluator ? `<tr><td><strong>${safe(member(ev.evaluatorId)?.name)}</strong></td>${resultCells}</tr>` : `<tr>${resultCells}</tr>`;
+  const resultCells = `<td>${safe(targetAccount?.name)}</td><td>${ev.submittedAt ? new Date(ev.submittedAt).toLocaleString('id-ID') : '-'}</td><td>${[5,4,3,2,1].map(rate => `${ratingStars(rate)}: ${counts[rate]}`).join("<br>")}<br>Bukti: ${proofCount}</td>`;
+  return showEvaluator ? `<tr><td><strong>${safe(evaluatorAccount?.name)}</strong></td>${resultCells}</tr>` : `<tr>${resultCells}</tr>`;
 }
 function shuView(){
   const rows = registeredShuRows();
@@ -1093,7 +1124,7 @@ function adminView(){
   </section>`;
 }
 function visibleAccounts(){
-  return Object.values(state.accounts || {}).filter(acc => acc.id !== APP_DATA.admin.id);
+  return Object.values(state.accounts || {}).filter(acc => acc.id !== ADMIN_ACCOUNT.id);
 }
 function userManagementSection(){
   return `<section class="card" style="margin-top:18px">
@@ -1104,7 +1135,7 @@ function userManagementSection(){
   </section>`;
 }
 function userRow(acc){
-  const locked = acc.id === APP_DATA.admin.id;
+  const locked = acc.id === ADMIN_ACCOUNT.id;
   return `<tr><td><div class="user-cell">${accountAvatar(acc, true)}<div><strong>${safe(acc.name)}</strong><br><span class="muted">${safe(acc.role)}</span></div></div></td><td>${safe(acc.type)}</td><td>${statusBadge(acc.status)}</td><td><div class="actions"><button class="ghost edit-user" data-user="${acc.id}" type="button">Edit</button>${locked ? "" : `<button class="danger delete-user" data-user="${acc.id}" type="button">Hapus</button>`}</div></td></tr>`;
 }
 function userEditPanel(){
@@ -1119,7 +1150,7 @@ function userEditPanel(){
       <label>Peran<select id="edit-user-role">${roles.map(role => `<option value="${safe(role.id)}" ${acc.role === role.id ? "selected" : ""}>${safe(role.label)}</option>`).join("")}</select></label>
     </div>
     <div class="auth-grid">
-      <label>Status<select id="edit-user-status" ${acc.id === APP_DATA.admin.id ? "disabled" : ""}><option value="approved" ${acc.status === "approved" ? "selected" : ""}>Approved</option><option value="pending" ${acc.status === "pending" ? "selected" : ""}>Pending</option><option value="rejected" ${acc.status === "rejected" ? "selected" : ""}>Rejected</option></select></label>
+      <label>Status<select id="edit-user-status" ${acc.id === ADMIN_ACCOUNT.id ? "disabled" : ""}><option value="approved" ${acc.status === "approved" ? "selected" : ""}>Approved</option><option value="pending" ${acc.status === "pending" ? "selected" : ""}>Pending</option><option value="rejected" ${acc.status === "rejected" ? "selected" : ""}>Rejected</option></select></label>
       <label>Password Baru<input id="edit-user-password" type="password" minlength="6" placeholder="Kosongkan jika tidak diganti" /></label>
     </div>
     <div class="actions"><button class="primary" type="submit">Simpan User</button><button id="cancel-edit-user" class="ghost" type="button">Batal</button></div>
@@ -1168,7 +1199,7 @@ function bindUserManagementControls(){
       }
       acc.name = document.querySelector("#edit-user-name").value.trim() || acc.name;
       acc.role = document.querySelector("#edit-user-role").value;
-      if(id !== APP_DATA.admin.id) acc.status = document.querySelector("#edit-user-status").value;
+      if(id !== ADMIN_ACCOUNT.id) acc.status = document.querySelector("#edit-user-status").value;
       if(password) acc.password = await hashPassword(password);
       saveState();
       editingUserId = null;
@@ -1177,15 +1208,15 @@ function bindUserManagementControls(){
     };
   }
 }
-function deleteUser(id){
-  if(id === APP_DATA.admin.id){ toast("Akun admin tidak bisa dihapus."); return; }
+async function deleteUser(id){
+  if(id === ADMIN_ACCOUNT.id){ toast("Akun admin tidak bisa dihapus."); return; }
   const acc = account(id);
   if(!acc) return;
   if(!confirm(`Hapus user ${acc.name}?`)) return;
   delete state.accounts[id];
   Object.keys(state.evaluations || {}).forEach(evKey => {
     const ev = state.evaluations[evKey];
-    if(ev?.evaluatorId === id || ev?.targetId === id || ev?.evaluatorId === acc.memberId || ev?.targetId === acc.memberId) delete state.evaluations[evKey];
+    if(ev?.evaluatorId === id || ev?.targetId === id) delete state.evaluations[evKey];
   });
   state.passwordRequests = (state.passwordRequests || []).filter(req => req.accountId !== id);
   if(activeUser === id){
@@ -1193,9 +1224,9 @@ function deleteUser(id){
     activeUser = null;
     activeTab = "dashboard";
   }
-  saveState();
+  await saveState({ immediate: true });
   toast("User dihapus.");
-  render();
+  await render();
 }
 async function decideSignup(requestId, status){
   const req = state.signupRequests.find(item => item.id === requestId);
@@ -1204,7 +1235,7 @@ async function decideSignup(requestId, status){
   req.decidedAt = new Date().toISOString();
   req.decidedBy = activeUser;
   if(status === "approved"){
-    const accountId = req.accountId || req.memberId;
+    const accountId = req.accountId;
     const existing = account(accountId) || {};
     const hashedPassword = await hashPassword(req.password);
     state.accounts[accountId] = { ...existing, id: accountId, memberId: req.memberId || null, name: req.name, role: req.role, profile: req.profile || parsePersonalInfo(req.note), password: hashedPassword, type: "member", status: "approved", createdAt: existing.createdAt || req.requestedAt, approvedAt: req.decidedAt };
@@ -1212,8 +1243,8 @@ async function decideSignup(requestId, status){
   } else {
     toast(`Request ${req.name} ditolak.`);
   }
-  saveState();
-  renderView();
+  await saveState({ immediate: true });
+  await renderView();
 }
 function passwordRequestRow(req, withActions){
   if(!withActions){
@@ -1235,8 +1266,8 @@ async function decidePasswordRequest(requestId, status){
   } else {
     toast(`Request password ${req.name} ditolak.`);
   }
-  saveState();
-  renderView();
+  await saveState({ immediate: true });
+  await renderView();
 }
 function settingsView(){
   const acc = activeAccount();
@@ -1244,13 +1275,54 @@ function settingsView(){
   const passwordPanel = isAdmin() ? "" : `<section class="card" style="margin-top:18px"><h2>Ajukan Ganti Password</h2><p class="muted">Password baru akan aktif setelah admin melakukan approval.</p>${pendingPassword ? `<div class="note">Ada ${pendingPassword} request ganti password yang masih menunggu approval admin.</div>` : ""}<form id="password-change-form" class="stack" style="margin-top:14px"><label>Password Baru<span class="password-wrap"><input id="new-password" type="password" autocomplete="new-password" minlength="6" placeholder="Minimal 6 karakter" required /><button id="toggle-new-password" class="icon-btn" type="button" aria-label="Lihat password baru">Lihat</button></span></label><label>Catatan untuk Admin<textarea id="password-change-note" placeholder="Contoh: mohon approve ganti password saya."></textarea></label><button class="primary" type="submit">Ajukan Ganti Password</button><p id="password-change-message" class="success hidden"></p><p id="password-change-error" class="error hidden"></p></form></section>`;
   const adminUserPanel = isAdmin() ? userManagementSection() : "";
   const openFileButton = state.cashFlow?.fileDataUrl ? `<button class="ghost open-cashflow-file" type="button">Buka File Arus Kas</button>` : "";
-  return `<section class="card"><h2>Pengaturan</h2><div class="grid two"><div><h3>Data Database</h3><p class="muted">Data disimpan ke MySQL melalui <code>api.php</code>, dengan salinan cadangan di browser jika koneksi database belum tersedia.</p><div class="actions">${openFileButton}<button id="clear-data" class="danger">Hapus Semua Data</button></div></div><div><h3>Akun Aktif</h3><div class="user-cell settings-user">${accountAvatar(acc, true)}<p><strong>${safe(acc?.name || "-")}</strong><br><span class="muted">${safe(acc?.role || "-")}</span></p></div><p class="muted">Pengurus dan anggota dibuat melalui sign up, lalu diverifikasi admin.</p><p class="muted">Status sinkron database: ${remoteReady ? "aktif" : "menunggu koneksi API"}.</p></div></div></section>${adminUserPanel}${passwordPanel}`;
+  const backupPanel = isAdmin() ? `<section class="card" style="margin-top:18px"><div class="toolbar"><div><h2>Backup Database Server</h2><p class="muted">Daftar file backup database (.sql) yang dibuat otomatis oleh server atau secara manual.</p></div><button id="generate-backup" class="primary" type="button">Buat Backup Sekarang</button></div><div id="backup-list"><div class="empty">Memuat data backup...</div></div></section>` : "";
+  return `<section class="card"><h2>Pengaturan</h2><div class="grid two"><div><h3>Data Database</h3><p class="muted">Data disimpan ke MySQL melalui <code>api.php</code>, dengan salinan cadangan di browser jika koneksi database belum tersedia.</p><div class="actions">${openFileButton}<button id="clear-data" class="danger">Hapus Semua Data</button></div></div><div><h3>Akun Aktif</h3><div class="user-cell settings-user">${accountAvatar(acc, true)}<p><strong>${safe(acc?.name || "-")}</strong><br><span class="muted">${safe(acc?.role || "-")}</span></p></div><p class="muted">Pengurus dan anggota dibuat melalui sign up, lalu diverifikasi admin.</p><p class="muted">Status sinkron database: ${remoteReady ? "aktif" : "menunggu koneksi API"}.</p></div></div></section>${adminUserPanel}${backupPanel}${passwordPanel}`;
 }
 function bindSettingsView(){
-  if(isAdmin()) bindUserManagementControls();
+  if(isAdmin()) {
+    bindUserManagementControls();
+    loadServerBackups();
+    const genBtn = document.querySelector("#generate-backup");
+    if(genBtn) {
+      genBtn.onclick = async () => {
+        genBtn.disabled = true;
+        const oldText = genBtn.textContent;
+        genBtn.textContent = "Memproses...";
+        try {
+          const res = await fetch(`${API_URL}?action=generate_backup`, { cache: "no-store" });
+          if(!res.ok) throw new Error("Gagal membuat backup.");
+          const data = await res.json();
+          if(!data.ok) throw new Error(data.error || "Gagal membuat backup.");
+          toast("Backup berhasil dibuat.");
+          loadServerBackups();
+        } catch(e) {
+          toast(e.message || "Gagal membuat backup.");
+        } finally {
+          genBtn.disabled = false;
+          genBtn.textContent = oldText;
+        }
+      };
+    }
+  }
   bindPasswordPanel();
   bindOpenCashFlowButtons();
-  document.querySelector("#clear-data").onclick = () => { if(confirm("Hapus semua data penilaian, akun, request sign up, request ganti password, arus kas, dan total SHU di browser ini?")){ state = { evaluations:{}, totalShu:0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt:null}; saveState(); toast("Data dihapus."); renderView(); } };
+  document.querySelector("#clear-data").onclick = async () => { if(confirm("Hapus semua data penilaian, akun, request sign up, request ganti password, arus kas, dan total SHU di browser ini?")){ state = { evaluations:{}, totalShu:0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt:null}; await saveState({ immediate: true }); toast("Data dihapus."); await renderView(); } };
+}
+async function loadServerBackups() {
+  const list = document.querySelector("#backup-list");
+  if(!list) return;
+  try {
+    const res = await fetch(`${API_URL}?action=list_backups`, { cache: "no-store" });
+    if(!res.ok) throw new Error("Gagal memuat list backup.");
+    const data = await res.json();
+    if(!data.backups || !data.backups.length) {
+      list.innerHTML = `<div class="empty">Belum ada file backup di server. Pastikan cron job backup.php sudah berjalan.</div>`;
+      return;
+    }
+    list.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Nama File</th><th>Ukuran</th><th>Waktu Backup</th><th>Aksi</th></tr></thead><tbody>${data.backups.map(b => `<tr><td><strong>${safe(b.name)}</strong></td><td>${Math.max(1, Math.round(b.size/1024))} KB</td><td>${new Date(b.time * 1000).toLocaleString('id-ID')}</td><td><a href="${API_URL}?action=download_backup&file=${encodeURIComponent(b.name)}" class="ghost" style="text-decoration:none; display:inline-block; padding:8px 12px;">Download</a></td></tr>`).join("")}</tbody></table></div>`;
+  } catch(e) {
+    list.innerHTML = `<div class="error note">Gagal memuat data: ${safe(e.message)}</div>`;
+  }
 }
 function bindPasswordPanel(){
   const passwordForm = document.querySelector("#password-change-form");
@@ -1303,18 +1375,47 @@ function bindPasswordPanel(){
     };
   }
 }
-render();
-setupInstallPrompt();
-pullRemoteState();
-setInterval(pullRemoteState, 5000);
 
-document.addEventListener("focusout", () => {
-  setTimeout(() => {
-    const activeEl = document.activeElement;
-    const isTyping = activeEl && ["INPUT", "TEXTAREA", "SELECT"].includes(activeEl.tagName);
-    if (!isTyping && needsRender) {
-      needsRender = false;
-      render();
+async function main() {
+  try {
+    const response = await fetch(`${API_URL}?action=get_app_data`, { cache: "no-store" });
+    if (!response.ok) {
+      let errMsg = 'Gagal memuat data aplikasi dari server.';
+      try {
+        const raw = await response.text();
+        try {
+          const errData = JSON.parse(raw);
+          if (errData.error) errMsg = errData.error;
+        } catch(e) {
+          errMsg += ' Respons server: ' + raw.substring(0, 150);
+        }
+      } catch(e){}
+      throw new Error(errMsg);
     }
-  }, 100);
-});
+    const data = await response.json();
+    APP_CONFIG.members = data.members;
+    APP_CONFIG.checklists = data.checklists;
+  } catch (error) {
+    console.error("Tidak bisa memuat data awal aplikasi:", error);
+    app.innerHTML = `<div class="card error-card"><h2>Gagal Memuat Aplikasi</h2><p>Tidak dapat terhubung ke database untuk memuat data awal. Pastikan file <code>config.php</code> sudah benar dan koneksi internet stabil.</p><p class="muted">${safe(error.message)}</p></div>`;
+    return;
+  }
+
+  await render();
+  setupInstallPrompt();
+  await pullRemoteState();
+  setInterval(pullRemoteState, 5000);
+
+  document.addEventListener("focusout", () => {
+    setTimeout(async () => {
+      const activeEl = document.activeElement;
+      const isTyping = activeEl && ["INPUT", "TEXTAREA", "SELECT"].includes(activeEl.tagName);
+      if (!isTyping && needsRender) {
+        needsRender = false;
+        await render();
+      }
+    }, 100);
+  });
+}
+
+main();

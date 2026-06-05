@@ -9,7 +9,7 @@ const APP_STATE_KEY = 'main';
 
 function db(): PDO
 {
-    static $pdo = null;
+    static ?PDO $pdo = null;
     if ($pdo instanceof PDO) {
         return $pdo;
     }
