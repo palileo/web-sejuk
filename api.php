@@ -54,6 +54,7 @@ function cashflow_file_response(): void
     $cashFlow = is_array($state['cashFlow'] ?? null) ? $state['cashFlow'] : null;
     $dataUrl = is_string($cashFlow['fileDataUrl'] ?? null) ? $cashFlow['fileDataUrl'] : '';
 
+    $match = [];
     if ($dataUrl === '' || !preg_match('/^data:([^;,]+)?;base64,(.+)$/', $dataUrl, $match)) {
         json_response(['ok' => false, 'error' => 'File arus kas belum tersedia.'], 404);
     }
