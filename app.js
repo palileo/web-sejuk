@@ -65,6 +65,12 @@ function normalizeState(data){
     authSchemaVersion: AUTH_SCHEMA_VERSION
   };
 }
+async function hashPassword(text) {
+  const msgBuffer = new TextEncoder().encode(text);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+}
 function scheduleRemoteSave(){
   clearTimeout(remoteSaveTimer);
   remoteSaveTimer = setTimeout(pushRemoteState, 550);
@@ -322,7 +328,7 @@ function renderLogin(){
     document.querySelector("#signup-open").classList.add("hidden");
     document.querySelector(".hint-box")?.classList.add("hidden");
   }
-  document.querySelector("#login-form").addEventListener("submit", e => {
+  document.querySelector("#login-form").addEventListener("submit", async e => {
     e.preventDefault();
     const id = select.value;
     const pass = document.querySelector("#login-password").value;
@@ -335,7 +341,18 @@ function renderLogin(){
       showLoginError("Akun admin hanya bisa login dari halaman /admin di browser.");
       return;
     }
-    if(!acc || acc.password !== pass){
+    
+    let isValid = false;
+    if(acc) {
+      if(acc.password.length === 64 && /^[a-f0-9]{64}$/i.test(acc.password)) {
+        const hashedPass = await hashPassword(pass);
+        isValid = (acc.password === hashedPass);
+      } else {
+        isValid = (acc.password === pass);
+      }
+    }
+
+    if(!acc || !isValid){
       showLoginError("Akun atau password tidak sesuai.");
       return;
     }
@@ -479,7 +496,7 @@ function profileView(){
   const profile = acc?.profile || {};
   const photo = acc?.photo?.dataUrl || "";
   const pendingPassword = (state.passwordRequests || []).filter(req => req.accountId === activeUser && req.status === "pending").length;
-  const passwordPanel = isAdmin() ? "" : `<section class="card" style="margin-top:18px"><h2>Ganti Password</h2><p class="muted">Password baru aktif setelah admin melakukan approval.</p>${pendingPassword ? `<div class="note">Ada ${pendingPassword} request ganti password yang masih menunggu approval admin.</div>` : ""}<form id="password-change-form" class="stack" style="margin-top:14px"><label>Password Baru<span class="password-wrap"><input id="new-password" type="password" autocomplete="new-password" minlength="6" placeholder="Minimal 6 karakter" required /><button id="toggle-new-password" class="icon-btn" type="button" aria-label="Lihat password baru">Lihat</button></span></label><label>Catatan untuk Admin<textarea id="password-change-note" placeholder="Contoh: mohon approve ganti password saya."></textarea></label><button class="primary" type="submit">Ajukan Ganti Password</button><p id="password-change-message" class="success hidden"></p><p id="password-change-error" class="error hidden"></p></form></section>`;
+  const passwordPanel = isAdmin() ? `<section class="card" style="margin-top:18px"><h2>Ganti Password Admin</h2><p class="muted">Password akan dienkripsi (hash) sebelum disimpan ke database.</p><form id="admin-password-form" class="stack" style="margin-top:14px"><label>Password Baru<span class="password-wrap"><input id="admin-new-password" type="password" autocomplete="new-password" minlength="6" placeholder="Minimal 6 karakter" required /><button id="toggle-admin-password" class="icon-btn" type="button" aria-label="Lihat password baru">Lihat</button></span></label><button class="primary" type="submit">Simpan Password</button><p id="admin-password-message" class="success hidden"></p><p id="admin-password-error" class="error hidden"></p></form></section>` : `<section class="card" style="margin-top:18px"><h2>Ganti Password</h2><p class="muted">Password baru aktif setelah admin melakukan approval.</p>${pendingPassword ? `<div class="note">Ada ${pendingPassword} request ganti password yang masih menunggu approval admin.</div>` : ""}<form id="password-change-form" class="stack" style="margin-top:14px"><label>Password Baru<span class="password-wrap"><input id="new-password" type="password" autocomplete="new-password" minlength="6" placeholder="Minimal 6 karakter" required /><button id="toggle-new-password" class="icon-btn" type="button" aria-label="Lihat password baru">Lihat</button></span></label><label>Catatan untuk Admin<textarea id="password-change-note" placeholder="Contoh: mohon approve ganti password saya."></textarea></label><button class="primary" type="submit">Ajukan Ganti Password</button><p id="password-change-message" class="success hidden"></p><p id="password-change-error" class="error hidden"></p></form></section>`;
   return `<section class="card profile-card">
     <div class="profile-head">
       <div class="avatar">${photo ? `<img src="${safe(photo)}" alt="Foto profil ${safe(acc?.name || "")}">` : safe((acc?.name || "U").slice(0,1).toUpperCase())}</div>
@@ -735,7 +752,7 @@ function bindUserManagementControls(){
   const form = document.querySelector("#user-edit-form");
   if(form){
     document.querySelector("#cancel-edit-user").onclick = () => { editingUserId = null; renderView(); };
-    form.onsubmit = e => {
+    form.onsubmit = async e => {
       e.preventDefault();
       const id = document.querySelector("#edit-user-id").value;
       const acc = account(id);
@@ -749,7 +766,7 @@ function bindUserManagementControls(){
       acc.name = document.querySelector("#edit-user-name").value.trim() || acc.name;
       acc.role = document.querySelector("#edit-user-role").value;
       if(id !== APP_DATA.admin.id) acc.status = document.querySelector("#edit-user-status").value;
-      if(password) acc.password = password;
+      if(password) acc.password = await hashPassword(password);
       saveState();
       editingUserId = null;
       toast("Data user disimpan.");
@@ -777,7 +794,7 @@ function deleteUser(id){
   toast("User dihapus.");
   render();
 }
-function decideSignup(requestId, status){
+async function decideSignup(requestId, status){
   const req = state.signupRequests.find(item => item.id === requestId);
   if(!req) return;
   req.status = status;
@@ -786,7 +803,8 @@ function decideSignup(requestId, status){
   if(status === "approved"){
     const accountId = req.accountId || req.memberId;
     const existing = account(accountId) || {};
-    state.accounts[accountId] = { ...existing, id: accountId, memberId: req.memberId || null, name: req.name, role: req.role, profile: req.profile || parsePersonalInfo(req.note), password: req.password, type: "member", status: "approved", createdAt: existing.createdAt || req.requestedAt, approvedAt: req.decidedAt };
+    const hashedPassword = await hashPassword(req.password);
+    state.accounts[accountId] = { ...existing, id: accountId, memberId: req.memberId || null, name: req.name, role: req.role, profile: req.profile || parsePersonalInfo(req.note), password: hashedPassword, type: "member", status: "approved", createdAt: existing.createdAt || req.requestedAt, approvedAt: req.decidedAt };
     toast(`Akun ${req.name} disetujui.`);
   } else {
     toast(`Request ${req.name} ditolak.`);
@@ -801,7 +819,7 @@ function passwordRequestRow(req, withActions){
   }
   return `<tr><td><strong>${safe(req.name)}</strong><br><span class="muted">${safe(req.role)}</span></td><td>${safe(req.note || "-")}</td><td>${new Date(req.requestedAt).toLocaleString("id-ID")}</td><td><div class="actions"><button class="primary approve-password-request" data-request="${req.id}" type="button">Approve</button><button class="danger reject-password-request" data-request="${req.id}" type="button">Reject</button></div></td></tr>`;
 }
-function decidePasswordRequest(requestId, status){
+async function decidePasswordRequest(requestId, status){
   const req = state.passwordRequests.find(item => item.id === requestId);
   if(!req) return;
   req.status = status;
@@ -809,7 +827,7 @@ function decidePasswordRequest(requestId, status){
   req.decidedBy = activeUser;
   if(status === "approved"){
     const acc = account(req.accountId);
-    if(acc) acc.password = req.newPassword;
+    if(acc) acc.password = await hashPassword(req.newPassword);
     toast(`Password ${req.name} disetujui.`);
   } else {
     toast(`Request password ${req.name} ditolak.`);
@@ -860,6 +878,28 @@ function bindPasswordPanel(){
       document.querySelector("#password-change-message").textContent = "Request ganti password terkirim. Tunggu approval admin.";
       document.querySelector("#password-change-message").classList.remove("hidden");
       passwordForm.reset();
+    };
+  }
+  const adminPasswordForm = document.querySelector("#admin-password-form");
+  if(adminPasswordForm){
+    bindPasswordToggle("#admin-new-password", "#toggle-admin-password");
+    adminPasswordForm.onsubmit = async e => {
+      e.preventDefault();
+      const password = document.querySelector("#admin-new-password").value;
+      if(password.length < 6){
+        document.querySelector("#admin-password-error").textContent = "Password minimal 6 karakter.";
+        document.querySelector("#admin-password-error").classList.remove("hidden");
+        return;
+      }
+      const acc = activeAccount();
+      if(acc) {
+        acc.password = await hashPassword(password);
+        saveState();
+        document.querySelector("#admin-password-error").classList.add("hidden");
+        document.querySelector("#admin-password-message").textContent = "Password berhasil diubah dan dienkripsi.";
+        document.querySelector("#admin-password-message").classList.remove("hidden");
+        adminPasswordForm.reset();
+      }
     };
   }
 }
