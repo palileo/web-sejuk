@@ -82,6 +82,23 @@ function accountMemberId(acc){
   if(!acc) return null;
   return resolveRoleIdByValue(acc.memberId) || resolveRoleIdByValue(acc.role) || null;
 }
+const ROLE_CHECKLIST_TEMPLATES = {
+  wakilketua: [
+    { no: 1, area: "Koordinasi", task: "Membantu ketua mengoordinasikan jalannya tugas setiap pengurus", frequency: "Mingguan", weight: 10 },
+    { no: 2, area: "Pendampingan", task: "Menggantikan peran ketua saat ketua berhalangan hadir", frequency: "Mingguan", weight: 10 },
+    { no: 3, area: "Pengawasan", task: "Memantau tindak lanjut keputusan rapat bersama ketua", frequency: "Mingguan", weight: 10 },
+    { no: 4, area: "Komunikasi", task: "Menjaga komunikasi aktif antara ketua dan seluruh pengurus", frequency: "Mingguan", weight: 10 },
+    { no: 5, area: "Disiplin", task: "Mengingatkan pengurus agar menjalankan tugas sesuai pembagian kerja", frequency: "Mingguan", weight: 10 },
+    { no: 6, area: "Penyelesaian Masalah", task: "Membantu menyelesaikan hambatan kerja internal pengurus secara cepat", frequency: "Mingguan", weight: 10 },
+    { no: 7, area: "Kehadiran", task: "Aktif hadir dalam rapat dan kegiatan penting koperasi", frequency: "Mingguan", weight: 10 },
+    { no: 8, area: "Inisiatif", task: "Memberikan usulan solusi atau langkah perbaikan untuk mendukung ketua", frequency: "Mingguan", weight: 10 },
+    { no: 9, area: "Tanggung Jawab", task: "Menjalankan amanah yang didelegasikan ketua dengan tuntas", frequency: "Mingguan", weight: 10 },
+    { no: 10, area: "Kepemimpinan", task: "Menjaga stabilitas kerja pengurus dan mendukung arah organisasi koperasi", frequency: "Mingguan", weight: 10 }
+  ]
+};
+function checklistTemplateForRole(roleId){
+  return JSON.parse(JSON.stringify(ROLE_CHECKLIST_TEMPLATES[roleId] || []));
+}
 
 function normalizeChecklistItems(items){
   if(!Array.isArray(items)) return [];
@@ -390,6 +407,8 @@ function signupRole(id){ return signupRoles().find(role => role.id === id); }
 function account(id){ return state.accounts?.[id]; }
 function activeAccount(){ return account(activeUser); }
 function isAdmin(){ return activeAccount()?.type === "admin"; }
+function isAnggotaAccount(acc){ return acc?.status === "approved" && acc?.role === "Anggota"; }
+function isAnggotaUser(id){ return isAnggotaAccount(account(id)); }
 function isChecklistMember(id){ const acc = account(id); const resolvedMemberId = accountMemberId(acc); return Boolean(resolvedMemberId && getRoleData(resolvedMemberId) && acc?.role !== "Anggota" && acc?.status === "approved"); }
 function accountLabel(acc){
   if(!acc) return "-";
@@ -710,7 +729,10 @@ function renderLogin(){
       showLoginError("Akun ditolak admin. Hubungi admin untuk pemeriksaan ulang.");
       return;
     }
-    activeUser = id; sessionStorage.setItem(SESSION_KEY,id); activeTab = isAdmin() ? "admin" : "dashboard"; render();
+    activeUser = id;
+    sessionStorage.setItem(SESSION_KEY,id);
+    activeTab = isAdmin() ? "admin" : isAnggotaAccount(acc) ? "shu" : "dashboard";
+    render();
   });
   document.querySelector("#signup-form").addEventListener("submit", e => {
     e.preventDefault();
@@ -791,14 +813,20 @@ function renderShell(){
   document.querySelector("#active-user").textContent = accountLabel(activeAccount());
   refreshInstallButton();
   document.querySelector("#install-app-btn").onclick = installApp;
+  const anggotaMode = isAnggotaUser(activeUser);
   if(isAdmin() && !["admin","profile","admin-evaluations","cashflow","settings"].includes(activeTab)) activeTab = "admin";
+  if(anggotaMode && !["profile","shu"].includes(activeTab)) activeTab = "shu";
   document.querySelector(".admin-tab").classList.toggle("hidden", !isAdmin());
   document.querySelectorAll(".admin-only-tab").forEach(btn => btn.classList.toggle("hidden", !isAdmin()));
   document.querySelector('[data-tab="settings"]').classList.toggle("hidden", !isAdmin());
   document.querySelectorAll('[data-tab="dashboard"], [data-tab="input"], [data-tab="evaluations"], [data-tab="shu"]').forEach(btn => btn.classList.toggle("hidden", isAdmin()));
   document.querySelectorAll('[data-tab="input"], [data-tab="evaluations"]').forEach(btn => btn.classList.toggle("hidden", !isChecklistMember(activeUser)));
+  document.querySelector('[data-tab="dashboard"]').classList.toggle("hidden", isAdmin() || anggotaMode);
+  document.querySelector('[data-tab="shu"]').classList.toggle("hidden", isAdmin());
   if(!isAdmin() && ["admin","admin-evaluations","cashflow","settings"].includes(activeTab)) activeTab = "dashboard";
+  if(anggotaMode && activeTab === "dashboard") activeTab = "shu";
   if(!isChecklistMember(activeUser) && ["input","evaluations"].includes(activeTab)) activeTab = "dashboard";
+  if(anggotaMode && ["input","evaluations","dashboard"].includes(activeTab)) activeTab = "shu";
   document.querySelector("#logout-btn").onclick = () => { sessionStorage.removeItem(SESSION_KEY); activeUser = null; activeTab = "dashboard"; render(); };
   document.querySelectorAll(".tabs button").forEach(btn => {
     btn.classList.toggle("active", btn.dataset.tab === activeTab);
@@ -1105,12 +1133,19 @@ function evaluationChecklistDetail(ev){
   return `<details><summary>${filled}/${checklist.length} item terisi</summary><ol class="detail-list">${rows}</ol></details>`;
 }
 function shuView(){
+  const anggotaMode = isAnggotaUser(activeUser);
   const rows = registeredShuRows();
   const distribution = normalizeShuDistribution(state.shuDistribution);
+  if(anggotaMode) {
+    const anggotaRows = rows.filter(row => row.targetId === activeUser);
+    const approvedAnggotaCount = registeredUsers().filter(acc => isAnggotaAccount(acc)).length;
+    return `<section class="card"><div class="toolbar"><div><h2>Pembagian SHU Anggota</h2><p class="muted">Porsi anggota adalah ${pct(distribution.anggota)} dari total SHU dan dibagi rata ke ${approvedAnggotaCount} anggota approved yang terdaftar.</p></div><button class="ghost" onclick="window.print()">Cetak</button></div><div id="shu-table">${anggotaRows.length ? `<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Anggota</th><th>Persentase SHU</th><th>Nominal SHU</th></tr></thead><tbody>${anggotaRows.map(row => `<tr><td><div class="user-cell">${accountAvatar(row.account, true)}<div><strong>${safe(row.member.name)}</strong><br><span class="muted" style="font-size:12px">${safe(row.member.role)}</span></div></div></td><td>${pct(row.shuPct)}</td><td class="currency">${rupiah(row.shuNominal)}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty">Data pembagian SHU anggota belum tersedia.</div>'}</div></section>`;
+  }
   return `<section class="card"><div class="toolbar"><div><h2>Pembagian SHU Otomatis</h2><p class="muted">Pengurus mendapat ${pct(distribution.pengurus)} SHU berdasarkan proporsi nilai. Anggota mendapat ${pct(distribution.anggota)} SHU, dibagi rata jika lebih dari satu anggota approved. <strong style="color:var(--danger)">Pengurus yang belum 100% menilai rekannya dicabut hak SHU-nya.</strong></p></div><button class="ghost" onclick="window.print()">Cetak</button></div><label style="max-width:360px">Input Total SHU<span class="rupiah-wrap"><span>Rp</span><input id="total-shu" type="text" inputmode="numeric" autocomplete="off" value="${rupiahInput(state.totalShu)}" placeholder="0" /></span></label><div id="shu-table">${rows.length ? `<div class="table-wrap" style="margin-top:16px">${summaryTable(rows, true)}</div>` : '<div class="empty">Belum ada user approved untuk pembagian SHU.</div>'}</div></section>`;
 }
 function bindShuView(){
   const input = document.querySelector("#total-shu");
+  if(!input) return;
   input.addEventListener("input", e => {
     state.totalShu = parseRupiah(e.target.value);
     e.target.value = rupiahInput(state.totalShu);
@@ -1696,7 +1731,11 @@ function bindChecklistEditorView() {
         applyAppData(data.appData, data.appDataRevision || "");
       } else {
         APP_CONFIG.members.push({ id, name, role, focus });
-        APP_CONFIG.checklists = normalizeChecklistMap({ ...APP_CONFIG.checklists, [id]: [] }, APP_CONFIG.members);
+        APP_CONFIG.checklists = normalizeChecklistMap({ ...APP_CONFIG.checklists, [id]: checklistTemplateForRole(id) }, APP_CONFIG.members);
+        persistAppConfig();
+      }
+      if(!(APP_CONFIG.checklists[id] || []).length) {
+        APP_CONFIG.checklists[id] = checklistTemplateForRole(id);
         persistAppConfig();
       }
       editingChecklists = normalizeChecklistMap({ ...editingChecklists, ...APP_CONFIG.checklists }, APP_CONFIG.members);
@@ -1837,6 +1876,12 @@ function bindSettingsView(){
     if(editChkBtn) {
       editChkBtn.onclick = () => {
         editingChecklists = normalizeChecklistMap(JSON.parse(JSON.stringify(APP_CONFIG.checklists)));
+        APP_CONFIG.members.filter(r => r.id !== "anggota").forEach(role => {
+          if(!(editingChecklists[role.id] || []).length) {
+            const template = checklistTemplateForRole(role.id);
+            if(template.length) editingChecklists[role.id] = template;
+          }
+        });
         activeTab = "checklists-editor";
         renderView();
       };
