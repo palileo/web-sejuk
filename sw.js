@@ -1,9 +1,9 @@
-const CACHE_NAME = "checklist-shu-v7";
+const CACHE_NAME = "checklist-shu-v9";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./style.css",
-  "./app.js",
+  "./style.css?v=20260607-2",
+  "./app.js?v=20260607-2",
   "./manifest.webmanifest",
   "./icons/icon.svg"
 ];

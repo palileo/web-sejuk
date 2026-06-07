@@ -1,7 +1,12 @@
 const STORAGE_KEY = "koperasi_checklist_shu_v1";
 const SESSION_KEY = "koperasi_active_user_v1";
 const AUTH_SCHEMA_VERSION = 2;
-const API_URL = "api.php"; // Pastikan path ini benar
+function resolveAppBaseUrl(){
+  const path = window.location.pathname;
+  const directory = path.endsWith("/") ? path : path.slice(0, path.lastIndexOf("/") + 1);
+  return `${window.location.origin}${directory.replace(/admin\/?$/, "")}`;
+}
+const API_URL = new URL("api.php", resolveAppBaseUrl()).toString();
 const CASHFLOW_FILE_URL = `${API_URL}?action=cashflow-file`;
 const CASHFLOW_MAX_FILE_SIZE = 4 * 1024 * 1024;
 const app = document.querySelector("#app");
@@ -1393,6 +1398,9 @@ async function main() {
       throw new Error(errMsg);
     }
     const data = await response.json();
+    if(!data?.ok || !Array.isArray(data.members) || !data.checklists || typeof data.checklists !== "object"){
+      throw new Error(data?.error || "Format data aplikasi dari server tidak valid.");
+    }
     APP_CONFIG.members = data.members;
     APP_CONFIG.checklists = data.checklists;
   } catch (error) {
@@ -1401,9 +1409,9 @@ async function main() {
     return;
   }
 
+  await pullRemoteState();
   await render();
   setupInstallPrompt();
-  await pullRemoteState();
   setInterval(pullRemoteState, 5000);
 
   document.addEventListener("focusout", () => {

@@ -99,50 +99,61 @@ function ensure_app_data_tables(): void
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ");
 
-    $stmt = $db->query('SELECT COUNT(*) FROM app_roles');
-    if ($stmt && $stmt->fetchColumn() == 0) {
-        $roles = [
-            ['ketua', 'Ketua Pengurus', 'Ketua Pengurus', 'Arah organisasi, keputusan, pengawasan'],
-            ['marketing', 'Manager Marketing', 'Manager Marketing', 'Pemasaran, penjualan, pasar, harga produk'],
-            ['sekretaris', 'Sekretaris Umum', 'Sekretaris Umum', 'Administrasi, notulen, arsip, evaluasi'],
-            ['bendahara', 'Bendahara Umum', 'Bendahara Umum', 'Keuangan, kas, laporan, pembagian hasil'],
-            ['operasional', 'Manager Operasional', 'Manager Lapangan / Operasional', 'Alur kerja, tugas lapangan, operasional'],
-            ['pengawas', 'Pengawas Koperasi', 'Pengawas Koperasi', 'Pengawasan pengurus, evaluasi kerja, transparansi, kontrol organisasi']
-        ];
-        $role_stmt = $db->prepare('INSERT INTO app_roles (id, name, role, focus) VALUES (?, ?, ?, ?)');
-        foreach ($roles as $role) {
-            $role_stmt->execute($role);
-        }
+    $roles = [
+        ['ketua', 'Ketua Pengurus', 'Ketua Pengurus', 'Arah organisasi, keputusan, pengawasan'],
+        ['marketing', 'Manager Marketing', 'Manager Marketing', 'Pemasaran, penjualan, pasar, harga produk'],
+        ['sekretaris', 'Sekretaris Umum', 'Sekretaris Umum', 'Administrasi, notulen, arsip, evaluasi'],
+        ['bendahara', 'Bendahara Umum', 'Bendahara Umum', 'Keuangan, kas, laporan, pembagian hasil'],
+        ['operasional', 'Manager Operasional', 'Manager Lapangan / Operasional', 'Alur kerja, tugas lapangan, operasional'],
+        ['pengawas', 'Pengawas Koperasi', 'Pengawas Koperasi', 'Pengawasan pengurus, evaluasi kerja, transparansi, kontrol organisasi']
+    ];
+    $role_stmt = $db->prepare('INSERT IGNORE INTO app_roles (id, name, role, focus) VALUES (?, ?, ?, ?)');
+    foreach ($roles as $role) {
+        $role_stmt->execute($role);
+    }
 
-        $checklists = [
-            'ketua' => [ [1, 'Kepemimpinan', 'Aktif memimpin rapat koperasi', 'Mingguan', 10], [2, 'Kepemimpinan', 'Menetapkan arah organisasi secara jelas', 'Mingguan', 10], [3, 'Keputusan', 'Berani mengambil keputusan penting', 'Mingguan', 10], [4, 'Pengawasan', 'Memastikan setiap keputusan rapat dijalankan', 'Mingguan', 10], [5, 'Pengawasan', 'Meminta laporan dari setiap bagian', 'Mingguan', 10], [6, 'Keuangan', 'Mengawasi keuangan bersama bendahara secara rutin', 'Mingguan', 10], [7, 'Koordinasi', 'Menjadi penengah jika terjadi perbedaan pendapat', 'Mingguan', 10], [8, 'Disiplin', 'Tidak membiarkan masalah menggantung', 'Mingguan', 10], [9, 'Disiplin', 'Menegur pengurus yang tidak menjalankan tugas', 'Mingguan', 10], [10, 'Arah Organisasi', 'Menjaga koperasi tetap sesuai prinsip dan tujuan', 'Mingguan', 10] ],
-            'marketing' => [ [1, 'Produk/Jasa', 'Membuat daftar produk atau jasa yang akan dipasarkan', 'Mingguan', 10], [2, 'Target', 'Menyusun target penjualan', 'Mingguan', 10], [3, 'Strategi', 'Membuat strategi promosi koperasi', 'Mingguan', 10], [4, 'Pasar', 'Menentukan target pasar', 'Mingguan', 10], [5, 'Mitra', 'Mencari calon pembeli atau mitra', 'Mingguan', 10], [6, 'Harga', 'Membuat aturan harga bersama bendahara dan ketua', 'Mingguan', 10], [7, 'Penjualan', 'Menyusun sistem penjualan yang jelas', 'Mingguan', 10], [8, 'Promosi', 'Membuat agenda promosi rutin', 'Mingguan', 10], [9, 'Laporan', 'Melaporkan perkembangan pasar secara berkala', 'Mingguan', 10], [10, 'Peluang', 'Membawa peluang nyata, bukan hanya ide', 'Mingguan', 10] ],
-            'sekretaris' => [ [1, 'Notulen', 'Setiap rapat memiliki notulen tertulis', 'Mingguan', 10], [2, 'Dokumen', 'Menyusun dokumen dasar koperasi', 'Mingguan', 10], [3, 'Keputusan', 'Mencatat keputusan dan pembagian tugas', 'Mingguan', 10], [4, 'Arsip', 'Mengarsipkan data anggota, program, dan kegiatan', 'Mingguan', 10], [5, 'Laporan', 'Membuat format laporan kerja tiap bagian', 'Mingguan', 10], [6, 'Pengingat', 'Mengingatkan pengurus terhadap tugas yang disepakati', 'Mingguan', 10], [7, 'Evaluasi', 'Menyusun indikator evaluasi keseriusan pengurus', 'Mingguan', 10], [8, 'Objektivitas', 'Mencatat perkembangan tiap orang secara objektif', 'Mingguan', 10], [9, 'Sistem', 'Menjaga sistem administrasi tetap rapi', 'Mingguan', 10], [10, 'Akurasi', 'Membedakan janji, rencana, dan tindakan nyata', 'Mingguan', 10] ],
-            'bendahara' => [ [1, 'Kas', 'Mencatat seluruh uang masuk dan keluar', 'Mingguan', 10], [2, 'Laporan', 'Membuat laporan kas koperasi', 'Mingguan', 10], [3, 'Bukti', 'Menyimpan bukti transaksi', 'Mingguan', 10], [4, 'Transparansi', 'Laporan keuangan bisa diperiksa', 'Mingguan', 10], [5, 'Pembagian Hasil', 'Menyusun sistem pembagian hasil tertulis', 'Mingguan', 10], [6, 'Anggaran', 'Mengatur pos anggaran kebutuhan mendesak', 'Mingguan', 10], [7, 'Koordinasi', 'Berkoordinasi dengan marketing soal harga dan penjualan', 'Mingguan', 10], [8, 'Koordinasi', 'Berkoordinasi dengan ketua soal pengawasan keuangan', 'Mingguan', 10], [9, 'Disiplin', 'Tidak menunda laporan uang', 'Mingguan', 10], [10, 'Integritas', 'Tidak mencampur uang pribadi dengan uang koperasi', 'Mingguan', 10] ],
-            'operasional' => [ [1, 'Tugas Lapangan', 'Membuat daftar tugas lapangan', 'Mingguan', 10], [2, 'Jadwal', 'Menyusun jadwal kerja atau pembagian tugas', 'Mingguan', 10], [3, 'Alur Kerja', 'Menyusun alur kerja dari pesanan sampai penyelesaian', 'Mingguan', 10], [4, 'Pengawasan', 'Mengawasi pelaksanaan tugas di lapangan', 'Mingguan', 10], [5, 'Kendala', 'Melaporkan kendala operasional dengan jelas', 'Mingguan', 10], [6, 'Pemerataan', 'Memastikan pekerjaan tidak dibebankan kepada orang tertentu', 'Mingguan', 10], [7, 'Kerapihan', 'Menjaga kerapihan proses kerja', 'Mingguan', 10], [8, 'Kepatuhan', 'Menjalankan operasional sesuai keputusan rapat', 'Mingguan', 10], [9, 'Kualitas', 'Menghindari kerja asal-asalan', 'Mingguan', 10], [10, 'Laporan', 'Membawa laporan nyata dari lapangan, bukan hanya keluhan', 'Mingguan', 10] ],
-            'pengawas' => [ [1, 'Pengawasan', 'Memantau perkembangan kerja setiap pengurus', 'Mingguan', 10], [2, 'Keputusan', 'Memastikan keputusan rapat benar-benar dijalankan', 'Mingguan', 10], [3, 'Pemeriksaan', 'Memeriksa laporan administrasi, keuangan, pemasaran, dan operasional', 'Mingguan', 10], [4, 'Teguran', 'Berani menegur jika ada tugas yang tidak dijalankan', 'Mingguan', 10], [5, 'Transparansi', 'Mengawasi transparansi keuangan bersama ketua dan bendahara', 'Mingguan', 10], [6, 'Integritas', 'Memastikan tidak ada penyalahgunaan wewenang, uang, atau keputusan', 'Mingguan', 10], [7, 'Objektivitas', 'Menilai keseriusan pengurus berdasarkan bukti kerja nyata', 'Mingguan', 10], [8, 'Laporan', 'Memberikan laporan hasil pengawasan kepada forum rapat', 'Mingguan', 10], [9, 'Netralitas', 'Tidak memihak kepada satu orang atau kelompok tertentu', 'Mingguan', 10], [10, 'Konstruktif', 'Memberikan masukan membangun, bukan hanya menyalahkan', 'Mingguan', 10] ]
-        ];
-        $item_stmt = $db->prepare('INSERT INTO app_checklist_items (role_id, no, area, task, frequency, weight) VALUES (?, ?, ?, ?, ?, ?)');
-        foreach ($checklists as $role_id => $items) {
-            foreach ($items as $item) {
-                $item_stmt->execute(array_merge([$role_id], $item));
-            }
+    $checklists = [
+        'ketua' => [ [1, 'Kepemimpinan', 'Aktif memimpin rapat koperasi', 'Mingguan', 10], [2, 'Kepemimpinan', 'Menetapkan arah organisasi secara jelas', 'Mingguan', 10], [3, 'Keputusan', 'Berani mengambil keputusan penting', 'Mingguan', 10], [4, 'Pengawasan', 'Memastikan setiap keputusan rapat dijalankan', 'Mingguan', 10], [5, 'Pengawasan', 'Meminta laporan dari setiap bagian', 'Mingguan', 10], [6, 'Keuangan', 'Mengawasi keuangan bersama bendahara secara rutin', 'Mingguan', 10], [7, 'Koordinasi', 'Menjadi penengah jika terjadi perbedaan pendapat', 'Mingguan', 10], [8, 'Disiplin', 'Tidak membiarkan masalah menggantung', 'Mingguan', 10], [9, 'Disiplin', 'Menegur pengurus yang tidak menjalankan tugas', 'Mingguan', 10], [10, 'Arah Organisasi', 'Menjaga koperasi tetap sesuai prinsip dan tujuan', 'Mingguan', 10] ],
+        'marketing' => [ [1, 'Produk/Jasa', 'Membuat daftar produk atau jasa yang akan dipasarkan', 'Mingguan', 10], [2, 'Target', 'Menyusun target penjualan', 'Mingguan', 10], [3, 'Strategi', 'Membuat strategi promosi koperasi', 'Mingguan', 10], [4, 'Pasar', 'Menentukan target pasar', 'Mingguan', 10], [5, 'Mitra', 'Mencari calon pembeli atau mitra', 'Mingguan', 10], [6, 'Harga', 'Membuat aturan harga bersama bendahara dan ketua', 'Mingguan', 10], [7, 'Penjualan', 'Menyusun sistem penjualan yang jelas', 'Mingguan', 10], [8, 'Promosi', 'Membuat agenda promosi rutin', 'Mingguan', 10], [9, 'Laporan', 'Melaporkan perkembangan pasar secara berkala', 'Mingguan', 10], [10, 'Peluang', 'Membawa peluang nyata, bukan hanya ide', 'Mingguan', 10] ],
+        'sekretaris' => [ [1, 'Notulen', 'Setiap rapat memiliki notulen tertulis', 'Mingguan', 10], [2, 'Dokumen', 'Menyusun dokumen dasar koperasi', 'Mingguan', 10], [3, 'Keputusan', 'Mencatat keputusan dan pembagian tugas', 'Mingguan', 10], [4, 'Arsip', 'Mengarsipkan data anggota, program, dan kegiatan', 'Mingguan', 10], [5, 'Laporan', 'Membuat format laporan kerja tiap bagian', 'Mingguan', 10], [6, 'Pengingat', 'Mengingatkan pengurus terhadap tugas yang disepakati', 'Mingguan', 10], [7, 'Evaluasi', 'Menyusun indikator evaluasi keseriusan pengurus', 'Mingguan', 10], [8, 'Objektivitas', 'Mencatat perkembangan tiap orang secara objektif', 'Mingguan', 10], [9, 'Sistem', 'Menjaga sistem administrasi tetap rapi', 'Mingguan', 10], [10, 'Akurasi', 'Membedakan janji, rencana, dan tindakan nyata', 'Mingguan', 10] ],
+        'bendahara' => [ [1, 'Kas', 'Mencatat seluruh uang masuk dan keluar', 'Mingguan', 10], [2, 'Laporan', 'Membuat laporan kas koperasi', 'Mingguan', 10], [3, 'Bukti', 'Menyimpan bukti transaksi', 'Mingguan', 10], [4, 'Transparansi', 'Laporan keuangan bisa diperiksa', 'Mingguan', 10], [5, 'Pembagian Hasil', 'Menyusun sistem pembagian hasil tertulis', 'Mingguan', 10], [6, 'Anggaran', 'Mengatur pos anggaran kebutuhan mendesak', 'Mingguan', 10], [7, 'Koordinasi', 'Berkoordinasi dengan marketing soal harga dan penjualan', 'Mingguan', 10], [8, 'Koordinasi', 'Berkoordinasi dengan ketua soal pengawasan keuangan', 'Mingguan', 10], [9, 'Disiplin', 'Tidak menunda laporan uang', 'Mingguan', 10], [10, 'Integritas', 'Tidak mencampur uang pribadi dengan uang koperasi', 'Mingguan', 10] ],
+        'operasional' => [ [1, 'Tugas Lapangan', 'Membuat daftar tugas lapangan', 'Mingguan', 10], [2, 'Jadwal', 'Menyusun jadwal kerja atau pembagian tugas', 'Mingguan', 10], [3, 'Alur Kerja', 'Menyusun alur kerja dari pesanan sampai penyelesaian', 'Mingguan', 10], [4, 'Pengawasan', 'Mengawasi pelaksanaan tugas di lapangan', 'Mingguan', 10], [5, 'Kendala', 'Melaporkan kendala operasional dengan jelas', 'Mingguan', 10], [6, 'Pemerataan', 'Memastikan pekerjaan tidak dibebankan kepada orang tertentu', 'Mingguan', 10], [7, 'Kerapihan', 'Menjaga kerapihan proses kerja', 'Mingguan', 10], [8, 'Kepatuhan', 'Menjalankan operasional sesuai keputusan rapat', 'Mingguan', 10], [9, 'Kualitas', 'Menghindari kerja asal-asalan', 'Mingguan', 10], [10, 'Laporan', 'Membawa laporan nyata dari lapangan, bukan hanya keluhan', 'Mingguan', 10] ],
+        'pengawas' => [ [1, 'Pengawasan', 'Memantau perkembangan kerja setiap pengurus', 'Mingguan', 10], [2, 'Keputusan', 'Memastikan keputusan rapat benar-benar dijalankan', 'Mingguan', 10], [3, 'Pemeriksaan', 'Memeriksa laporan administrasi, keuangan, pemasaran, dan operasional', 'Mingguan', 10], [4, 'Teguran', 'Berani menegur jika ada tugas yang tidak dijalankan', 'Mingguan', 10], [5, 'Transparansi', 'Mengawasi transparansi keuangan bersama ketua dan bendahara', 'Mingguan', 10], [6, 'Integritas', 'Memastikan tidak ada penyalahgunaan wewenang, uang, atau keputusan', 'Mingguan', 10], [7, 'Objektivitas', 'Menilai keseriusan pengurus berdasarkan bukti kerja nyata', 'Mingguan', 10], [8, 'Laporan', 'Memberikan laporan hasil pengawasan kepada forum rapat', 'Mingguan', 10], [9, 'Netralitas', 'Tidak memihak kepada satu orang atau kelompok tertentu', 'Mingguan', 10], [10, 'Konstruktif', 'Memberikan masukan membangun, bukan hanya menyalahkan', 'Mingguan', 10] ]
+    ];
+    $item_stmt = $db->prepare('INSERT IGNORE INTO app_checklist_items (role_id, no, area, task, frequency, weight) VALUES (?, ?, ?, ?, ?, ?)');
+    foreach ($checklists as $role_id => $items) {
+        foreach ($items as $item) {
+            $item_stmt->execute(array_merge([$role_id], $item));
         }
     }
 }
 
 function get_app_data_response(): void
 {
-    $roles_stmt = db()->query('SELECT id, name, role, focus FROM app_roles');
+    $roles_stmt = db()->query("
+        SELECT id, name, role, focus
+        FROM app_roles
+        ORDER BY CASE id
+            WHEN 'ketua' THEN 1
+            WHEN 'marketing' THEN 2
+            WHEN 'sekretaris' THEN 3
+            WHEN 'bendahara' THEN 4
+            WHEN 'operasional' THEN 5
+            WHEN 'pengawas' THEN 6
+            ELSE 99
+        END, id ASC
+    ");
     $roles = $roles_stmt ? $roles_stmt->fetchAll(PDO::FETCH_ASSOC) : [];
 
-    $checklist_stmt = db()->query('SELECT role_id, no, area, task, frequency, weight FROM app_checklist_items ORDER BY no ASC');
+    $checklist_stmt = db()->query('SELECT role_id, no, area, task, frequency, weight FROM app_checklist_items ORDER BY role_id ASC, no ASC');
     $checklist_items = $checklist_stmt ? $checklist_stmt->fetchAll(PDO::FETCH_ASSOC) : [];
 
     $checklists = [];
     foreach ($checklist_items as $item) {
         $role_id = $item['role_id'];
         unset($item['role_id']);
+        $item['no'] = (int) $item['no'];
+        $item['weight'] = (int) $item['weight'];
         if (!isset($checklists[$role_id])) {
             $checklists[$role_id] = [];
         }
@@ -153,14 +164,8 @@ function get_app_data_response(): void
 }
 
 try {
-    // Optimasi: Hanya jalankan pembuatan tabel jika tabel belum ada untuk mengurangi beban database
-    try {
-        db()->query('SELECT 1 FROM app_state LIMIT 1');
-        db()->query('SELECT 1 FROM app_roles LIMIT 1');
-    } catch (PDOException $e) {
-        ensure_state_table();
-        ensure_app_data_tables();
-    }
+    ensure_state_table();
+    ensure_app_data_tables();
 
     if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         if (($_GET['action'] ?? '') === 'cashflow-file') {

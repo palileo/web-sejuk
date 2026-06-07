@@ -1,6 +1,6 @@
 # Aplikasi Checklist Kinerja & Pembagian SHU Pengurus Koperasi
 
-Aplikasi web statis responsif untuk checklist kinerja pengurus koperasi dan simulasi pembagian SHU. Proyek ini siap diunggah ke shared hosting/cPanel seperti Arenhost karena hanya memakai HTML, CSS, dan JavaScript tanpa proses build.
+Aplikasi web responsif untuk checklist kinerja pengurus koperasi dan simulasi pembagian SHU. Proyek ini siap diunggah ke shared hosting/cPanel seperti Arenhost karena hanya memakai HTML, CSS, JavaScript, PHP, dan MySQL tanpa proses build.
 
 ## Fitur
 
@@ -67,11 +67,9 @@ Lalu buka `http://localhost:8000`.
 5. File utama yang wajib ada:
    - `index.html`
    - `style.css`
-   - `data.js`
    - `app.js`
    - `api.php`
    - `config.php`
-   - `install.php`
    - `manifest.webmanifest`
    - `sw.js`
    - folder `icons`
@@ -80,9 +78,8 @@ Lalu buka `http://localhost:8000`.
 6. Pastikan `index.html` berada langsung di root folder domain, bukan di dalam subfolder tambahan.
 7. Edit `config.php`, lalu isi password database dari cPanel pada baris:
    - `DB_PASS`
-8. Buka `https://mak.indosejuk.my.id/install.php` satu kali untuk membuat tabel database.
-9. Jika muncul pesan install selesai, hapus `install.php` dari hosting.
-10. Buka domain di browser dan login memakai akun demo.
+8. Buka domain di browser. `api.php` otomatis membuat tabel database yang dibutuhkan dan mengisi data referensi awal jika tabel masih kosong.
+9. Login admin melalui `https://mak.indosejuk.my.id/admin`.
 
 Data database yang disiapkan untuk versi backend:
 
@@ -90,7 +87,7 @@ Data database yang disiapkan untuk versi backend:
 - User database: `indoseju_mak`
 - Folder domain: `indoseju/mak.indosejuk.my.id`
 
-Versi ini menyimpan data penilaian, akun, request, total SHU, persentase SHU, dan file arus kas ke tabel `app_state` di MySQL melalui `api.php`. Browser tetap menyimpan salinan lokal sebagai fallback jika koneksi database sedang gagal.
+Versi ini menyimpan data penilaian, akun, request, total SHU, persentase SHU, dan file arus kas ke tabel `app_state` di MySQL melalui `api.php`. Data role dan checklist dimuat dari tabel `app_roles` dan `app_checklist_items`, bukan dari file JavaScript statis. Browser tetap menyimpan salinan lokal sebagai fallback jika koneksi database sedang gagal.
 
 File `.htaccess` sudah disiapkan untuk:
 
