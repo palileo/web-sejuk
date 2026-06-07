@@ -11,6 +11,8 @@ const CASHFLOW_FILE_URL = `${API_URL}?action=cashflow-file`;
 const CASHFLOW_MAX_FILE_SIZE = 4 * 1024 * 1024;
 const app = document.querySelector("#app");
 
+document.head.insertAdjacentHTML("beforeend", `<style>@keyframes spin-anim { 100% { transform: rotate(360deg); } } .icon-spin { display: inline-block; animation: spin-anim 1s linear infinite; margin-right: 6px; font-weight: bold; }</style>`);
+
 const ADMIN_ACCOUNT = { id: "admin", name: "Admin Indosejuk", role: "Administrator", password: "admin123" };
 const RATINGS = [
     { value: 1, label: "1 Bintang", score: 20 },
@@ -28,6 +30,14 @@ let APP_CONFIG = {
   checklists: {} // Akan diisi dari API
 };
 
+const CONFIG_STORAGE_KEY = "koperasi_app_config_v1";
+try {
+  const cachedConfig = JSON.parse(localStorage.getItem(CONFIG_STORAGE_KEY));
+  if(cachedConfig && Array.isArray(cachedConfig.members) && cachedConfig.checklists) {
+    applyAppData(cachedConfig);
+  }
+} catch(e) {}
+
 let state = loadState();
 let activeUser = sessionStorage.getItem(SESSION_KEY);
 let activeTab = "dashboard";
@@ -42,7 +52,78 @@ let lastAppliedRevision = "";
 let editingChecklists = null;
 let checklistCurrentRole = null;
 
+function persistAppConfig(appDataRevision = ""){
+  localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify({ members: APP_CONFIG.members, checklists: APP_CONFIG.checklists }));
+  if(appDataRevision) localStorage.setItem("koperasi_last_appdata_revision", appDataRevision);
+}
+function applyAppData(appData, appDataRevision = ""){
+  if(!appData) return false;
+  APP_CONFIG.members = Array.isArray(appData.members) ? appData.members : APP_CONFIG.members;
+  APP_CONFIG.checklists = normalizeChecklistMap(appData.checklists || APP_CONFIG.checklists, APP_CONFIG.members);
+  persistAppConfig(appDataRevision);
+  return true;
+}
+function normalizeRoleText(value){
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+function resolveRoleIdByValue(value){
+  if(!value) return null;
+  const direct = APP_CONFIG.members.find(role => role.id === value);
+  if(direct) return direct.id;
+  const normalized = normalizeRoleText(value);
+  const matched = APP_CONFIG.members.find(role =>
+    normalizeRoleText(role.id) === normalized ||
+    normalizeRoleText(role.name) === normalized ||
+    normalizeRoleText(role.role) === normalized
+  );
+  return matched?.id || null;
+}
+function accountMemberId(acc){
+  if(!acc) return null;
+  return resolveRoleIdByValue(acc.memberId) || resolveRoleIdByValue(acc.role) || null;
+}
+
+function normalizeChecklistItems(items){
+  if(!Array.isArray(items)) return [];
+  return items
+    .map(item => ({
+      no: Number(item?.no) || 0,
+      area: String(item?.area ?? "").trim(),
+      task: String(item?.task ?? "").trim(),
+      frequency: String(item?.frequency ?? "").trim(),
+      weight: Number(item?.weight) || 0
+    }))
+    .filter(item => item.no > 0 && item.task !== "")
+    .sort((a, b) => a.no - b.no);
+}
+function normalizeChecklistMap(checklists, members = APP_CONFIG.members){
+  const normalized = {};
+  members.filter(role => role.id !== "anggota").forEach(role => {
+    normalized[role.id] = normalizeChecklistItems(checklists?.[role.id] || []);
+  });
+  if(checklists && typeof checklists === "object"){
+    Object.keys(checklists).forEach(roleId => {
+      if(roleId !== "anggota" && !normalized[roleId]) normalized[roleId] = normalizeChecklistItems(checklists[roleId]);
+    });
+  }
+  return normalized;
+}
+
 function defaultAccounts(){ return { [ADMIN_ACCOUNT.id]: { id: ADMIN_ACCOUNT.id, memberId: null, name: ADMIN_ACCOUNT.name, role: ADMIN_ACCOUNT.role, password: ADMIN_ACCOUNT.password, type: "admin", status: "approved", createdAt: new Date().toISOString(), approvedAt: new Date().toISOString() } }; }
+function normalizeEvaluationsCollection(value){
+  if(!value || typeof value !== "object") return {};
+  if(Array.isArray(value)) {
+    const mapped = {};
+    value.forEach(item => {
+      if(!item || typeof item !== "object" || item._deleted) return;
+      const evaluatorId = item.evaluatorId || "";
+      const targetId = item.targetId || "";
+      if(evaluatorId && targetId) mapped[key(evaluatorId, targetId)] = item;
+    });
+    return mapped;
+  }
+  return value;
+}
 function loadState(){
   const fallback = { evaluations: {}, totalShu: 0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt: null };
   try {
@@ -56,43 +137,55 @@ function loadState(){
   catch { return fallback; }
 }
 function saveState(options = {}){
+  state.evaluations = normalizeEvaluationsCollection(state.evaluations);
   state.authSchemaVersion = AUTH_SCHEMA_VERSION;
   state.updatedAt = new Date().toISOString();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  if(options.localOnly) return Promise.resolve(false);
+  if(options.localOnly) return Promise.resolve({ ok: false, error: "Mode lokal aktif" });
   if(options.immediate) {
     clearTimeout(remoteSaveTimer);
-    return pushRemoteState();
+    return pushRemoteState().then(async result => {
+      if(result?.ok) await pullRemoteState({ preferRemote: true, silent: true });
+      return result;
+    });
   }
   scheduleRemoteSave();
-  return Promise.resolve(false);
+  return Promise.resolve({ ok: true });
 }
 function normalizeState(data){
   const fallback = { evaluations: {}, totalShu: 0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt: null };
   const clean = cleanLegacyFields(data || {});
   const admin = ADMIN_ACCOUNT;
   const savedAdmin = clean.accounts?.[admin.id] || {};
+  const evaluations = normalizeEvaluationsCollection(clean.evaluations);
+  const mergedAccounts = cleanLegacyFields({
+    ...fallback.accounts,
+    ...(clean.accounts || {}),
+    [admin.id]: {
+      ...fallback.accounts[admin.id],
+      ...savedAdmin,
+      id: admin.id,
+      memberId: null,
+      name: savedAdmin.name || admin.name,
+      role: admin.role,
+      password: savedAdmin.password || admin.password,
+      type: "admin",
+      status: "approved"
+    }
+  });
+  Object.keys(mergedAccounts).forEach(accountId => {
+    const acc = mergedAccounts[accountId];
+    if(!acc || acc.type === "admin" || acc._deleted) return;
+    acc.memberId = accountMemberId(acc);
+  });
   return {
     ...fallback,
     ...clean,
+    evaluations,
     totalShu: Number(clean.totalShu || 0),
     shuDistribution: normalizeShuDistribution(clean.shuDistribution),
     cashFlow: normalizeCashFlow(clean.cashFlow),
-    accounts: cleanLegacyFields({
-      ...fallback.accounts,
-      ...(clean.accounts || {}),
-      [admin.id]: {
-        ...fallback.accounts[admin.id],
-        ...savedAdmin,
-        id: admin.id,
-        memberId: null,
-        name: savedAdmin.name || admin.name,
-        role: admin.role,
-        password: savedAdmin.password || admin.password,
-        type: "admin",
-        status: "approved"
-      }
-    }),
+    accounts: mergedAccounts,
     signupRequests: cleanLegacyFields(clean.signupRequests || []),
     passwordRequests: cleanLegacyFields(clean.passwordRequests || []),
     authSchemaVersion: AUTH_SCHEMA_VERSION
@@ -138,25 +231,51 @@ function scheduleRemoteSave(){
 async function pullRemoteState(options = {}){
   const preferRemote = options.preferRemote === true;
   const silent = options.silent !== false;
+  const throwOnError = options.throwOnError === true;
   try {
     const response = await fetch(API_URL, { headers: { "Accept": "application/json" }, cache: "no-store" });
-    if(!response.ok) throw new Error("API database belum siap.");
+    if(!response.ok) {
+      let errMsg = `HTTP ${response.status}`;
+      try {
+        const text = await response.text();
+        try {
+          const data = JSON.parse(text);
+          if(data?.error) errMsg = data.error;
+        } catch {
+          errMsg = text.substring(0, 160) || errMsg;
+        }
+      } catch {}
+      throw new Error(errMsg || "API database belum siap.");
+    }
     const result = await response.json();
+    
+    const appDataRevision = result.appDataRevision || "";
+    const lastAppDataRevision = localStorage.getItem("koperasi_last_appdata_revision");
+    let configUpdated = false;
+    if(result?.appData) {
+      APP_CONFIG.members = Array.isArray(result.appData.members) ? result.appData.members : APP_CONFIG.members;
+      APP_CONFIG.checklists = normalizeChecklistMap(result.appData.checklists || APP_CONFIG.checklists, APP_CONFIG.members);
+      if (appDataRevision !== lastAppDataRevision) {
+        persistAppConfig(appDataRevision);
+        configUpdated = true;
+      }
+    }
+
     if(result?.state){
       const remoteState = normalizeState(result.state);
       const serverTime = result.updatedAt;
       const revision = result.revision || "";
       const lastRevision = localStorage.getItem("koperasi_last_server_revision");
       
-      if(!preferRemote && hasLoadedRemoteState && revision && revision === lastRevision){
+      if(!preferRemote && hasLoadedRemoteState && revision && revision === lastRevision && !configUpdated){
         remoteReady = true;
-        return;
+        return { ok: true, configUpdated: false, stateUpdated: false };
       }
       
-      if(!preferRemote && hasLoadedRemoteState && state.updatedAt === remoteState.updatedAt){
+      if(!preferRemote && hasLoadedRemoteState && state.updatedAt === remoteState.updatedAt && !configUpdated){
         remoteReady = true;
         if(serverTime) localStorage.setItem("koperasi_last_server_time", serverTime);
-        return;
+        return { ok: true, configUpdated: false, stateUpdated: false };
       }
       
       state = remoteState;
@@ -174,17 +293,31 @@ async function pullRemoteState(options = {}){
       if(!isTyping) {
         render();
         needsRender = false;
-        if(isNewRevision && !preferRemote && !silent) toast("Data server diperbarui.");
+        if((isNewRevision || configUpdated) && !preferRemote && !silent) toast("Data server diperbarui.");
       } else {
         needsRender = true;
       }
+      return { ok: true, configUpdated, stateUpdated: true };
     } else {
       remoteReady = true;
       hasLoadedRemoteState = true;
+      if (configUpdated) {
+        const activeEl = document.activeElement;
+        const isTyping = activeEl && ["INPUT", "TEXTAREA", "SELECT"].includes(activeEl.tagName);
+        if(!isTyping) {
+          render();
+          needsRender = false;
+        } else {
+          needsRender = true;
+        }
+      }
+      return { ok: true, configUpdated, stateUpdated: false };
     }
   } catch(error) {
     remoteReady = false;
     console.warn(error.message || error);
+    if(throwOnError) throw error;
+    return { ok: false, error: error.message };
   }
 }
 async function pushRemoteState(){
@@ -198,24 +331,27 @@ async function pushRemoteState(){
     });
 
     if (response.status === 409) {
-      // Terjadi konflik! Orang lain telah menimpa data server lebih dulu.
-      toast("Gagal menyimpan: Data bertabrakan dengan pengguna lain. Memuat data terbaru...");
+      toast("Sinkron ditunda: Memperbarui data yang bertabrakan dengan user lain...");
       await pullRemoteState({ preferRemote: true, silent: false });
-      return false;
+      return { ok: false, error: "Konflik data" };
     }
 
-    if(!response.ok) throw new Error("Sinkron database gagal.");
+    if(!response.ok) {
+      let errMsg = `HTTP ${response.status}`;
+      try { const text = await response.text(); try { const errData = JSON.parse(text); if (errData.error) errMsg = errData.error; } catch(e) { errMsg = text.substring(0, 50); } } catch(e) {}
+      throw new Error(errMsg);
+    }
     const result = await response.json().catch(() => ({}));
     remoteReady = true;
     if(result?.updatedAt) localStorage.setItem("koperasi_last_server_time", result.updatedAt);
     if(result?.revision) localStorage.setItem("koperasi_last_server_revision", result.revision);
     if(result?.revision) lastAppliedRevision = result.revision;
     localStorage.setItem("koperasi_last_pushed_time", pushedTime);
-    return true;
+    return { ok: true };
   } catch(error) {
     remoteReady = false;
     console.warn(error.message || error);
-    return false;
+    return { ok: false, error: error.message };
   }
 }
 function cleanLegacyFields(value){
@@ -231,15 +367,17 @@ function getEvaluatableMembers() {
     return Object.values(state.accounts)
         .filter(acc => acc.status === 'approved' && acc.type === 'member' && acc.role !== 'Anggota')
         .map(acc => {
-            const roleData = getRoleData(acc.memberId);
+            const resolvedMemberId = accountMemberId(acc);
+            const roleData = getRoleData(resolvedMemberId);
             return {
                 id: acc.id,
                 name: acc.name,
                 role: acc.role,
                 focus: roleData?.focus || '',
-                memberId: acc.memberId
+                memberId: resolvedMemberId
             };
-        });
+        })
+        .filter(member => Boolean(member.memberId));
 }
 function getMemberData(accountId) { return getEvaluatableMembers().find(m => m.id === accountId); }
 function signupRoles(){
@@ -252,7 +390,7 @@ function signupRole(id){ return signupRoles().find(role => role.id === id); }
 function account(id){ return state.accounts?.[id]; }
 function activeAccount(){ return account(activeUser); }
 function isAdmin(){ return activeAccount()?.type === "admin"; }
-function isChecklistMember(id){ const acc = account(id); return Boolean(acc?.memberId && getRoleData(acc.memberId) && acc.role !== "Anggota" && acc.status === "approved"); }
+function isChecklistMember(id){ const acc = account(id); const resolvedMemberId = accountMemberId(acc); return Boolean(resolvedMemberId && getRoleData(resolvedMemberId) && acc?.role !== "Anggota" && acc?.status === "approved"); }
 function accountLabel(acc){
   if(!acc) return "-";
   return `${acc.name} (${acc.role})`;
@@ -402,7 +540,9 @@ function registeredUsers(){
 }
 function registeredShuRows(){
   const users = registeredUsers();
-  const pengurusUsers = users.filter(acc => acc.role !== "Anggota" && acc.memberId);
+  const pengurusUsers = users
+    .map(acc => ({ ...acc, memberId: accountMemberId(acc) }))
+    .filter(acc => acc.role !== "Anggota" && acc.memberId);
   const anggota = users.filter(acc => acc.role === "Anggota");
   const distribution = normalizeShuDistribution(state.shuDistribution);
   
@@ -433,11 +573,38 @@ function registeredShuRows(){
 function registeredDashboardRows(){
   return registeredShuRows().map(row => ({ ...row, shuPct: row.shuPct || 0, shuNominal: row.shuNominal || 0 }));
 }
-function approvedChecklistAccounts(){ return registeredUsers().filter(acc => acc.memberId && getRoleData(acc.memberId) && acc.role !== "Anggota"); }
+function approvedChecklistAccounts(){
+  return registeredUsers()
+    .map(acc => ({ ...acc, memberId: accountMemberId(acc) }))
+    .filter(acc => acc.memberId && getRoleData(acc.memberId) && acc.role !== "Anggota");
+}
 function toast(message){
   const el = document.createElement("div"); el.className = "toast"; el.textContent = message; document.body.appendChild(el);
   setTimeout(()=>el.remove(),2200);
 }
+
+function bindSyncButton(selector, defaultText = "Sinkron & Cache Data") {
+  const syncBtn = document.querySelector(selector);
+  if(syncBtn) {
+    syncBtn.onclick = async () => {
+      syncBtn.disabled = true;
+      syncBtn.innerHTML = `<span class="icon-spin">↻</span> Menyinkronkan...`;
+      try {
+        const result = await pullRemoteState({ preferRemote: true, silent: false, throwOnError: true });
+        if(!result?.ok) throw new Error(result?.error || "Sinkron gagal.");
+        toast("Data terbaru berhasil dimuat dan disimpan di cache browser.");
+      } catch(e) {
+        toast(e.message || "Gagal memuat data dari server.");
+      } finally {
+        if(document.body.contains(syncBtn)) {
+          syncBtn.disabled = false;
+          syncBtn.innerHTML = defaultText;
+        }
+      }
+    };
+  }
+}
+
 function setupInstallPrompt(){
   window.addEventListener("beforeinstallprompt", event => {
     event.preventDefault();
@@ -547,8 +714,9 @@ function renderLogin(){
   });
   document.querySelector("#signup-form").addEventListener("submit", e => {
     e.preventDefault();
-    const memberId = signupSelect.value;
-    const selected = signupRole(memberId);
+    const requestedRoleId = signupSelect.value;
+    const memberId = requestedRoleId === "anggota" ? null : (resolveRoleIdByValue(requestedRoleId) || requestedRoleId);
+    const selected = signupRole(requestedRoleId);
     const password = document.querySelector("#signup-password").value;
     const note = document.querySelector("#signup-note").value.trim();
     const profile = parsePersonalInfo(note);
@@ -560,14 +728,14 @@ function renderLogin(){
       showSignupError("Nama wajib diisi pada catatan untuk admin.");
       return;
     }
-    const existingPending = memberId !== "anggota" && state.signupRequests.some(req => req.memberId === memberId && req.status === "pending");
+    const existingPending = memberId !== null && state.signupRequests.some(req => req.memberId === memberId && req.status === "pending");
     if(existingPending){
       showSignupError("Request untuk akses ini masih menunggu keputusan admin.");
       return;
     }
     const baseId = (profile.nama || 'user').split(' ')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
     const accountId = `${baseId}_${Date.now()}`;
-    state.signupRequests.unshift({ id: `req_${Date.now()}`, accountId, memberId: memberId === "anggota" ? null : memberId, name: profile.nama, role: selected.role, password, note, profile, status: "pending", requestedAt: new Date().toISOString(), decidedAt: null, decidedBy: null });
+    state.signupRequests.unshift({ id: `req_${Date.now()}`, accountId, memberId, name: profile.nama, role: selected.role, password, note, profile, status: "pending", requestedAt: new Date().toISOString(), decidedAt: null, decidedBy: null });
     saveState();
     document.querySelector("#signup-error").classList.add("hidden");
     document.querySelector("#signup-message").textContent = "Sign up terkirim. Tunggu admin melakukan approval sebelum login.";
@@ -641,12 +809,12 @@ function renderShell(){
 function renderView(){
   const view = document.querySelector("#view");
   if(activeTab === "admin") { view.innerHTML = adminView(); bindAdminView(); return; }
-  if(activeTab === "admin-evaluations") { view.innerHTML = adminEvaluationsView(); bindOpenCashFlowButtons(); return; }
+  if(activeTab === "admin-evaluations") { view.innerHTML = adminEvaluationsView(); bindOpenCashFlowButtons(); bindSyncButton("#sync-data-admin-eval", "Sinkron Data"); return; }
   if(activeTab === "cashflow") { view.innerHTML = cashFlowView(); bindCashFlowView(); return; }
   if(activeTab === "dashboard") { view.innerHTML = dashboardView(); bindDashboardView(); }
   if(activeTab === "profile") { view.innerHTML = profileView(); bindProfileView(); }
   if(activeTab === "input") { view.innerHTML = inputView(); bindInputView(); }
-  if(activeTab === "evaluations") view.innerHTML = evaluationsView();
+  if(activeTab === "evaluations") { view.innerHTML = evaluationsView(); bindSyncButton("#sync-data-eval", "Sinkron Data"); }
   if(activeTab === "shu") { view.innerHTML = shuView(); bindShuView(); }
   if(activeTab === "settings") { view.innerHTML = settingsView(); bindSettingsView(); }
   if(activeTab === "checklists-editor") { view.innerHTML = checklistEditorView(); bindChecklistEditorView(); }
@@ -659,6 +827,7 @@ function dashboardView(){
   const evalCount = allEvaluationRows().length;
   const showRules = isChecklistMember(activeUser);
   const openFileButton = state.cashFlow?.fileDataUrl ? `<button class="ghost open-cashflow-file" type="button">Buka File Arus Kas</button>` : "";
+  const syncButton = `<button id="sync-data-dashboard" class="primary" type="button">Sinkron & Cache Data</button>`;
   
   let alertHtml = "";
   if (showRules) {
@@ -688,7 +857,7 @@ function dashboardView(){
   </div>
   <div class="grid ${showRules ? "two" : ""}" style="margin-top:18px">
     <section class="card">
-      <div class="toolbar"><div class="kpi-title"><h2>Nilai Keseriusan Pengurus</h2><span class="badge ${countVery ? 'good':'bad'}">${countVery} Sangat Serius</span></div><div class="actions">${openFileButton}</div></div>
+      <div class="toolbar"><div class="kpi-title"><h2>Nilai Keseriusan Pengurus</h2><span class="badge ${countVery ? 'good':'bad'}">${countVery} Sangat Serius</span></div><div class="actions">${syncButton}${openFileButton}</div></div>
       ${rows.length ? `<div class="table-wrap">${summaryTable(rows, false)}</div>` : '<div class="empty">Belum ada user approved.</div>'}
     </section>
     ${showRules ? `<aside class="card">
@@ -702,6 +871,7 @@ function dashboardView(){
 }
 function bindDashboardView(){
   bindOpenCashFlowButtons();
+  bindSyncButton("#sync-data-dashboard", "Sinkron & Cache Data");
 }
 function profileView(){
   const acc = activeAccount();
@@ -751,8 +921,8 @@ function bindProfileView(){
       nomorWa: document.querySelector("#profile-wa").value.trim()
     };
     acc.name = acc.profile.nama || acc.name;
-    const saved = await saveState({ immediate: true });
-    toast(saved ? "Profil tersimpan ke database." : "Profil tersimpan lokal. Sinkron database belum berhasil.");
+    const res = await saveState({ immediate: true });
+    toast(res?.ok ? "Profil tersimpan ke database." : `Disimpan lokal. Error: ${res?.error || "Gagal sinkron"}`);
     renderShell();
   };
   bindPasswordPanel();
@@ -764,29 +934,40 @@ function summaryTable(rows, withShu){
 function inputView(){
   if(!isChecklistMember(activeUser)) return `<section class="card"><h2>Akses Anggota</h2><p class="muted">Akun anggota tidak memiliki akses pengisian checklist pengurus.</p></section>`;
   const targets = approvedChecklistAccounts().filter(acc => acc.id !== activeUser);
-  if(!targets.find(t => t.id === selectedTarget)) selectedTarget = targets[0]?.id;
-  if(!targets.length) return `<section class="card"><h2>Isi Checklist Pengurus Lain</h2><div class="empty">Belum ada user pengurus approved lain untuk dinilai.</div></section>`;
-  const targetAccount = account(selectedTarget);
-  const roleData = getRoleData(targetAccount.memberId);
+  
+  let targetAccount = targets.find(t => t.id === selectedTarget) ? account(selectedTarget) : null;
+  if (!targetAccount) {
+    if (targets.length > 0) {
+      selectedTarget = targets[0].id;
+      targetAccount = account(selectedTarget);
+    } else {
+      targetAccount = activeAccount();
+    }
+  }
+
+  const targetMemberId = accountMemberId(targetAccount);
+  const roleData = getRoleData(targetMemberId);
   const ev = getEvaluation(activeUser, targetAccount.id);
-  const items = APP_CONFIG.checklists[targetAccount.memberId] || [];
+  const items = APP_CONFIG.checklists[targetMemberId] || [];
+  const isPreview = !targets.length || targetAccount.id === activeUser;
+
   return `<section class="card">
     <h2>Isi Checklist Pengurus Lain</h2>
     <p class="muted">Login sebagai <strong>${safe(activeAccount().name)}</strong>. Target penilaian hanya user pengurus yang sudah approved admin.</p>
-    <div class="member-picker">${targets.map(acc => {
+    ${targets.length ? `<div class="member-picker">${targets.map(acc => {
       const cItems = APP_CONFIG.checklists[acc.memberId] || [];
       const cEv = getEvaluation(activeUser, acc.id);
       const filled = cItems.filter(item => answerRating(cEv.items?.[item.no]) !== 0).length;
       const badge = cItems.length > 0 && filled === cItems.length ? '<span class="badge good" style="margin-top:6px; display:inline-block">Selesai 100%</span>' : `<span class="badge ${filled > 0 ? 'mid' : 'bad'}" style="margin-top:6px; display:inline-block">${filled}/${cItems.length} Terisi</span>`;
       return `<button class="member-card ${acc.id===selectedTarget?'active':''}" data-target="${acc.id}"><strong>${safe(acc.name)}</strong><br><span class="muted">${safe(acc.role)}</span><br>${badge}</button>`;
-    }).join("")}</div>
+    }).join("")}</div>` : `<div class="note info" style="margin-bottom:0">Belum ada pengurus lain yang terdaftar. Di bawah ini adalah <strong>Pratinjau Checklist</strong> untuk jabatan Anda.</div>`}
   </section>
   <section class="card" style="margin-top:18px">
-    <div class="toolbar"><div><h2>Checklist: ${safe(targetAccount.name)}</h2><p class="muted">${safe(targetAccount.role)} | Fokus: ${safe(roleData?.focus)}</p></div><div class="actions"><button id="save-checklist" class="primary">Simpan Checklist</button><button id="reset-current" class="ghost">Kosongkan Form Ini</button></div></div>
+    <div class="toolbar"><div><h2>Checklist: ${safe(targetAccount.name)} ${isPreview ? '(Pratinjau)' : ''}</h2><p class="muted">${safe(targetAccount.role)} | Fokus: ${safe(roleData?.focus)}</p></div><div class="actions"><button id="sync-data-input" class="ghost" type="button">Sinkron Data</button><button id="save-checklist" class="primary" ${isPreview ? 'disabled title="Pendaftaran pengguna lain diperlukan"' : ''}>Simpan Checklist</button><button id="reset-current" class="ghost" ${isPreview ? 'disabled' : ''}>Kosongkan Form Ini</button></div></div>
     ${items.length ? `<form id="checklist-form" class="checklist-form">${items.map(item => {
       const ans = ev.items[item.no] || {};
       const rating = answerRating(ans);
-      return `<article class="check-item"><div class="check-num">${item.no}</div><div><h3>${safe(item.task)}</h3><p class="muted">Area: ${safe(item.area)} • Frekuensi: ${safe(item.frequency)} • Bobot: ${item.weight}</p><div class="check-fields"><div class="field-label"><span>Nilai Bintang</span><div class="rating-group" role="radiogroup" aria-label="Nilai untuk ${safe(item.task)}">${ratingOptions().map(rate=>`<label class="star-choice" ${rate.value===-1?'style="background:#f8fafc"':''}><input type="radio" name="rating-${item.no}" value="${rate.value}" ${rating===rate.value?'checked':''}><span>${rate.value > 0 ? "★".repeat(rate.value) : "—"}</span><small>${rate.score !== null ? rate.score : "N/A"}</small></label>`).join("")}</div></div><div class="field-label"><span>Bukti / Link</span><input name="proof-${item.no}" value="${safe(ans.proof||"")}" placeholder="Tempel link bukti bila ada" /><div class="upload-actions"><label class="file-picker" for="file-${item.no}">Pilih File<input id="file-${item.no}" name="file-${item.no}" type="file" accept="image/*" /></label><label class="file-picker" for="camera-${item.no}">Kamera<input id="camera-${item.no}" name="camera-${item.no}" type="file" accept="image/*" capture="environment" /></label></div>${proofPreview(ans)}</div><label>Catatan Evaluasi<textarea name="note-${item.no}" placeholder="Catatan singkat">${safe(ans.note||"")}</textarea></label></div></div></article>`;
+      return `<article class="check-item"><div class="check-num">${item.no}</div><div><h3>${safe(item.task)}</h3><p class="muted">Area: ${safe(item.area)} • Frekuensi: ${safe(item.frequency)} • Bobot: ${item.weight}</p><div class="check-fields"><div class="field-label"><span>Nilai Bintang</span><div class="rating-group" role="radiogroup" aria-label="Nilai untuk ${safe(item.task)}">${ratingOptions().map(rate=>`<label class="star-choice" ${rate.value===-1?'style="background:#f8fafc"':''}><input type="radio" name="rating-${item.no}" value="${rate.value}" ${rating===rate.value?'checked':''} ${isPreview ? 'disabled' : ''}><span>${rate.value > 0 ? "★".repeat(rate.value) : "—"}</span><small>${rate.score !== null ? rate.score : "N/A"}</small></label>`).join("")}</div></div><div class="field-label"><span>Bukti / Link</span><input name="proof-${item.no}" value="${safe(ans.proof||"")}" placeholder="Tempel link bukti bila ada" ${isPreview ? 'disabled' : ''} /><div class="upload-actions"><label class="file-picker" for="file-${item.no}" ${isPreview ? 'style="opacity:0.5;pointer-events:none;"' : ''}>Pilih File<input id="file-${item.no}" name="file-${item.no}" type="file" accept="image/*" ${isPreview ? 'disabled' : ''} /></label><label class="file-picker" for="camera-${item.no}" ${isPreview ? 'style="opacity:0.5;pointer-events:none;"' : ''}>Kamera<input id="camera-${item.no}" name="camera-${item.no}" type="file" accept="image/*" capture="environment" ${isPreview ? 'disabled' : ''} /></label></div>${proofPreview(ans)}</div><label>Catatan Evaluasi<textarea name="note-${item.no}" placeholder="Catatan singkat" ${isPreview ? 'disabled' : ''}>${safe(ans.note||"")}</textarea></label></div></div></article>`;
     }).join("")}</form>` : '<div class="empty">Data checklist untuk role ini belum tersedia di database.</div>'}
     <p class="footer-note">Terakhir disimpan: ${ev.submittedAt ? new Date(ev.submittedAt).toLocaleString('id-ID') : 'belum pernah'}</p>
   </section>`;
@@ -823,34 +1004,49 @@ function convertImageToWebp(file){
   });
 }
 async function bindInputView(){
+  bindSyncButton("#sync-data-input", "Sinkron Data");
   document.querySelectorAll(".member-card:not([disabled])").forEach(btn => btn.onclick = () => { selectedTarget = btn.dataset.target; renderView(); });
   document.querySelector("#save-checklist").onclick = async () => {
     if(activeUser === selectedTarget){ toast("Pengurus tidak boleh menilai diri sendiri."); return; }
+    
+    const btn = document.querySelector("#save-checklist");
+    btn.disabled = true;
+    btn.innerHTML = `<span class="icon-spin">↻</span> Menyimpan...`;
+
     const targetMember = getMemberData(selectedTarget);
     const form = document.querySelector("#checklist-form");
     const items = {};
     const current = getEvaluation(activeUser, selectedTarget);
+    const roleItems = APP_CONFIG.checklists[targetMember.memberId] || [];
+    let filledCount = 0;
     try {
-      for(const item of APP_CONFIG.checklists[targetMember.memberId] || []){
+      for(const item of roleItems){
         const existing = current.items[item.no] || {};
         const file = form[`file-${item.no}`].files[0] || form[`camera-${item.no}`].files[0];
         const proofFile = file ? await convertImageToWebp(file) : existing.proofFile || null;
         const rating = Number(form[`rating-${item.no}`].value);
-        if(!rating) throw new Error(`Nilai bintang nomor ${item.no} belum dipilih.`);
-        items[item.no] = { rating, proof: form[`proof-${item.no}`].value.trim(), proofFile, note: form[`note-${item.no}`].value.trim() };
+        if (rating || existing.rating) filledCount++;
+        items[item.no] = { 
+          rating: rating || existing.rating || 0, 
+          proof: form[`proof-${item.no}`].value.trim(), 
+          proofFile, 
+          note: form[`note-${item.no}`].value.trim() 
+        };
       }
     } catch(error) {
       toast(error.message || "Upload bukti gagal.");
+      btn.disabled = false;
+      btn.innerHTML = "Simpan Checklist";
       return;
     }
-    const savedToDatabase = await setEvaluation({ evaluatorId: activeUser, targetId: selectedTarget, items, submittedAt: new Date().toISOString() }, { immediate: true });
-    toast(savedToDatabase ? "Checklist tersimpan ke database." : "Checklist tersimpan lokal. Sinkron database belum berhasil.");
+    const res = await setEvaluation({ evaluatorId: activeUser, targetId: selectedTarget, items, submittedAt: new Date().toISOString() }, { immediate: true });
+    toast(res?.ok ? `Checklist tersimpan ke database (${filledCount}/${roleItems.length} terisi).` : `Disimpan lokal. Error: ${res?.error || "Gagal sinkron"}`);
     renderView();
   };
   document.querySelector("#reset-current").onclick = () => {
     if(confirm("Kosongkan penilaian Anda untuk pengurus ini?")){
       state.evaluations[key(activeUser,selectedTarget)] = { _deleted: true, timestamp: Date.now() };
-      saveState({ immediate: true }).then(saved => toast(saved ? "Penilaian dikosongkan dan tersimpan ke database." : "Penilaian dikosongkan lokal. Sinkron database belum berhasil."));
+      saveState({ immediate: true }).then(res => toast(res?.ok ? "Penilaian dikosongkan dan tersimpan ke database." : `Disimpan lokal. Error: ${res?.error || "Gagal sinkron"}`));
       renderView();
     }
   };
@@ -877,7 +1073,7 @@ function evaluationsView(){
     </section>
   </div>
   <section class="card" style="margin-top:18px">
-    <div class="toolbar"><div><h2>Penilaian Pengurus Lain</h2><p class="muted">Aktivitas penilaian antar pengurus lain secara anonim.</p></div></div>
+    <div class="toolbar"><div><h2>Penilaian Pengurus Lain</h2><p class="muted">Aktivitas penilaian antar pengurus lain secara anonim.</p></div><div class="actions"><button id="sync-data-eval" class="ghost" type="button">Sinkron Data</button></div></div>
     ${renderTable(others)}
   </section>`;
 }
@@ -896,7 +1092,7 @@ function evaluationRow(ev, showEvaluator = true){
 }
 function evaluationChecklistDetail(ev){
   const targetAccount = account(ev.targetId);
-  const checklist = APP_CONFIG.checklists[targetAccount?.memberId] || [];
+  const checklist = APP_CONFIG.checklists[accountMemberId(targetAccount)] || [];
   if(!checklist.length) return `<span class="muted">Checklist role tidak ditemukan.</span>`;
   const filled = checklist.filter(item => answerRating(ev.items?.[item.no]) !== 0).length;
   const rows = checklist.map(item => {
@@ -1205,7 +1401,7 @@ function adminEvaluationsView(){
     <article class="card metric"><span>Pengurus / Anggota</span><strong>${pct(distribution.pengurus)} / ${pct(distribution.anggota)}</strong></article>
   </div>
   <section class="card" style="margin-top:18px">
-    <div class="toolbar"><div><h2>Aktivitas Penilaian User</h2><p class="muted">Admin dapat melihat siapa yang memberi penilaian, siapa yang dinilai, tanggal, dan ringkasan hasil.</p></div><div class="actions">${openFileButton}</div></div>
+    <div class="toolbar"><div><h2>Aktivitas Penilaian User</h2><p class="muted">Admin dapat melihat siapa yang memberi penilaian, siapa yang dinilai, tanggal, dan ringkasan hasil.</p></div><div class="actions"><button id="sync-data-admin-eval" class="ghost" type="button">Sinkron Data</button>${openFileButton}</div></div>
     ${evaluations.length ? `<div class="table-wrap"><table><thead><tr><th>Evaluator</th><th>Dinilai</th><th>Tanggal</th><th>Ringkasan Nilai</th><th>Detail Checklist</th></tr></thead><tbody>${evaluations.map(ev => evaluationRow(ev, true)).join("")}</tbody></table></div>` : '<div class="empty">Belum ada aktivitas penilaian.</div>'}
   </section>
   <section class="card" style="margin-top:18px">
@@ -1315,11 +1511,12 @@ function bindUserManagementControls(){
       }
       acc.name = document.querySelector("#edit-user-name").value.trim() || acc.name;
       acc.role = document.querySelector("#edit-user-role").value;
+      if(acc.type !== "admin") acc.memberId = resolveRoleIdByValue(acc.role) || accountMemberId(acc);
       if(id !== ADMIN_ACCOUNT.id) acc.status = document.querySelector("#edit-user-status").value;
       if(password) acc.password = await hashPassword(password);
-      const saved = await saveState({ immediate: true });
+      const res = await saveState({ immediate: true });
       editingUserId = null;
-      toast(saved ? "Data user tersimpan ke database." : "Data user tersimpan lokal. Sinkron database belum berhasil.");
+      toast(res?.ok ? "Data user tersimpan ke database." : `Disimpan lokal. Error: ${res?.error || "Gagal sinkron"}`);
       renderView();
     };
   }
@@ -1356,7 +1553,7 @@ async function decideSignup(requestId, status){
     const accountId = req.accountId;
     const existing = account(accountId) || {};
     const hashedPassword = await hashPassword(req.password);
-    state.accounts[accountId] = { ...existing, id: accountId, memberId: req.memberId || null, name: req.name, role: req.role, profile: req.profile || parsePersonalInfo(req.note), password: hashedPassword, type: "member", status: "approved", createdAt: existing.createdAt || req.requestedAt, approvedAt: req.decidedAt };
+    state.accounts[accountId] = { ...existing, id: accountId, memberId: resolveRoleIdByValue(req.memberId) || resolveRoleIdByValue(req.role) || null, name: req.name, role: req.role, profile: req.profile || parsePersonalInfo(req.note), password: hashedPassword, type: "member", status: "approved", createdAt: existing.createdAt || req.requestedAt, approvedAt: req.decidedAt };
     toast(`Akun ${req.name} disetujui.`);
   } else {
     toast(`Request ${req.name} ditolak.`);
@@ -1371,12 +1568,48 @@ function settingsView(){
   const openFileButton = state.cashFlow?.fileDataUrl ? `<button class="ghost open-cashflow-file" type="button">Buka File Arus Kas</button>` : "";
   const backupPanel = isAdmin() ? `<section class="card" style="margin-top:18px"><div class="toolbar"><div><h2>Backup Database Server</h2><p class="muted">Daftar file backup database (.sql) yang dibuat otomatis oleh server atau secara manual.</p></div><button id="generate-backup" class="primary" type="button">Buat Backup Sekarang</button></div><div id="backup-list"><div class="empty">Memuat data backup...</div></div></section>` : "";
   const checklistPanel = isAdmin() ? `<section class="card" style="margin-top:18px"><div class="toolbar"><div><h2>Manajemen Checklist</h2><p class="muted">Edit tugas, area, frekuensi, dan bobot checklist untuk setiap jabatan pengurus secara langsung.</p></div><button id="edit-checklists-btn" class="primary" type="button">Edit Checklist</button></div></section>` : "";
-  return `<section class="card"><h2>Pengaturan</h2><div class="grid two"><div><h3>Data Database</h3><p class="muted">Data disimpan ke MySQL melalui <code>api.php</code>, dengan salinan cadangan di browser jika koneksi database belum tersedia.</p><div class="actions">${openFileButton}<button id="clear-data" class="danger">Hapus Semua Data</button></div></div><div><h3>Akun Aktif</h3><div class="user-cell settings-user">${accountAvatar(acc, true)}<p><strong>${safe(acc?.name || "-")}</strong><br><span class="muted">${safe(acc?.role || "-")}</span></p></div><p class="muted">Pengurus dan anggota dibuat melalui sign up, lalu diverifikasi admin.</p><p class="muted">Status sinkron database: ${remoteReady ? "aktif" : "menunggu koneksi API"}.</p></div></div></section>${adminUserPanel}${checklistPanel}${backupPanel}${passwordPanel}`;
+  return `<section class="card"><h2>Pengaturan</h2><div class="grid two"><div><h3>Data Database</h3><p class="muted">Data disimpan ke MySQL melalui <code>api.php</code>, dengan salinan cadangan di browser jika koneksi database belum tersedia.</p><div class="actions">${openFileButton}<button id="sync-data" class="primary">Sinkron & Cache Data</button><button id="clear-data" class="danger">Hapus Semua Data</button></div></div><div><h3>Akun Aktif</h3><div class="user-cell settings-user">${accountAvatar(acc, true)}<p><strong>${safe(acc?.name || "-")}</strong><br><span class="muted">${safe(acc?.role || "-")}</span></p></div><p class="muted">Pengurus dan anggota dibuat melalui sign up, lalu diverifikasi admin.</p><p class="muted">Status sinkron database: ${remoteReady ? "aktif" : "menunggu koneksi API"}.</p></div></div></section>${adminUserPanel}${checklistPanel}${backupPanel}${passwordPanel}`;
 }
+
+function escapeCsv(text) {
+  const str = String(text || "").replace(/"/g, '""');
+  return /[",\n]/.test(str) ? `"${str}"` : str;
+}
+
+function parseCsvLine(text) {
+  const result = [];
+  let inQuotes = false;
+  let current = "";
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (inQuotes) {
+      if (char === '"' && text[i+1] === '"') {
+        current += '"';
+        i++;
+      } else if (char === '"') {
+        inQuotes = false;
+      } else {
+        current += char;
+      }
+    } else {
+      if (char === '"') {
+        inQuotes = true;
+      } else if (char === ',') {
+        result.push(current);
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+  }
+  result.push(current);
+  return result;
+}
+
 function checklistEditorView() {
   const roles = APP_CONFIG.members.filter(r => r.id !== 'anggota');
   if (!checklistCurrentRole || !roles.find(r => r.id === checklistCurrentRole)) checklistCurrentRole = roles[0]?.id;
-  let html = `<section class="card"><div class="toolbar"><div><h2>Edit Checklist Pengurus</h2><p class="muted">Ubah data checklist. Pastikan total bobot setiap jabatan sesuai.</p></div><div class="actions"><button id="save-checklists-btn" class="primary">Simpan Perubahan</button><button id="cancel-checklists-btn" class="ghost">Batal</button></div></div>`;
+  let html = `<section class="card"><div class="toolbar"><div><h2>Edit Checklist Pengurus</h2><p class="muted">Ubah data checklist langsung, atau gunakan Excel (.csv) untuk mempercepat edit massal.</p></div><div class="actions"><label class="ghost file-action" style="cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">Import CSV<input id="import-checklist-csv" type="file" accept=".csv" class="hidden"></label><button id="export-checklist-csv" class="ghost" type="button">Export CSV</button><button id="save-checklists-btn" class="primary">Simpan Perubahan</button><button id="cancel-checklists-btn" class="ghost">Batal</button></div></div>`;
   html += `<div class="checklist-editor-tabs" style="display:flex;gap:8px;margin-bottom:16px;overflow-x:auto;">`;
   roles.forEach((r) => {
     html += `<button class="role-tab-btn ${r.id === checklistCurrentRole ? 'primary' : 'ghost'}" data-role="${r.id}" style="border-radius:999px;">${safe(r.name)}</button>`;
@@ -1387,6 +1620,16 @@ function checklistEditorView() {
 }
 function bindChecklistEditorView() {
   const content = document.querySelector("#checklist-editor-content");
+  const collectEditorRows = () => {
+    const rows = [...content.querySelectorAll("tbody tr")].map(row => ({
+      no: Number(row.querySelector(".ce-no")?.value) || 0,
+      area: row.querySelector(".ce-area")?.value || "",
+      task: row.querySelector(".ce-task")?.value || "",
+      frequency: row.querySelector(".ce-freq")?.value || "",
+      weight: Number(row.querySelector(".ce-weight")?.value) || 0
+    }));
+    editingChecklists[checklistCurrentRole] = normalizeChecklistItems(rows);
+  };
   function renderEditor() {
     const items = editingChecklists[checklistCurrentRole] || [];
     let html = `<div class="table-wrap"><table><thead><tr><th>No</th><th>Area</th><th>Tugas</th><th>Frekuensi</th><th>Bobot</th><th>Aksi</th></tr></thead><tbody>`;
@@ -1418,6 +1661,7 @@ function bindChecklistEditorView() {
   }
   document.querySelectorAll(".role-tab-btn").forEach(btn => {
     btn.onclick = () => {
+      collectEditorRows();
       checklistCurrentRole = btn.dataset.role;
       document.querySelectorAll(".role-tab-btn").forEach(b => { b.classList.remove("primary"); b.classList.add("ghost"); });
       btn.classList.remove("ghost");
@@ -1447,12 +1691,17 @@ function bindChecklistEditorView() {
       });
       const data = await res.json();
       if (!data.ok) throw new Error(data.error);
-      
-      APP_CONFIG.members.push({ id, name, role, focus });
-      editingChecklists[id] = [];
-      APP_CONFIG.checklists[id] = [];
+
+      if (data.appData) {
+        applyAppData(data.appData, data.appDataRevision || "");
+      } else {
+        APP_CONFIG.members.push({ id, name, role, focus });
+        APP_CONFIG.checklists = normalizeChecklistMap({ ...APP_CONFIG.checklists, [id]: [] }, APP_CONFIG.members);
+        persistAppConfig();
+      }
+      editingChecklists = normalizeChecklistMap({ ...editingChecklists, ...APP_CONFIG.checklists }, APP_CONFIG.members);
       checklistCurrentRole = id;
-      
+      await pullRemoteState({ preferRemote: true, silent: true });
       toast("Jabatan baru berhasil ditambahkan.");
       renderView();
     } catch (err) {
@@ -1461,6 +1710,7 @@ function bindChecklistEditorView() {
   };
   document.querySelector("#cancel-checklists-btn").onclick = () => { editingChecklists = null; activeTab = "settings"; renderView(); };
   document.querySelector("#save-checklists-btn").onclick = async () => {
+    collectEditorRows();
     let invalidRoles = [];
     for (const role in editingChecklists) {
       if (editingChecklists[role].length > 0) {
@@ -1479,17 +1729,83 @@ function bindChecklistEditorView() {
     const btn = document.querySelector("#save-checklists-btn");
     btn.disabled = true; btn.textContent = "Menyimpan...";
     try {
-      const res = await fetch(`${API_URL}?action=save_checklists`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ checklists: editingChecklists }) });
+      const payload = normalizeChecklistMap(editingChecklists);
+      const res = await fetch(`${API_URL}?action=save_checklists`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ checklists: payload }) });
       const data = await res.json();
       if (!data.ok) throw new Error(data.error);
-      toast("Checklist berhasil diperbarui.");
-      APP_CONFIG.checklists = JSON.parse(JSON.stringify(editingChecklists));
+      if (data.appData) {
+        applyAppData(data.appData, data.appDataRevision || "");
+      } else {
+        APP_CONFIG.checklists = normalizeChecklistMap(payload, APP_CONFIG.members);
+        persistAppConfig();
+      }
+      await pullRemoteState({ preferRemote: true, silent: true });
+      toast("Checklist berhasil diperbarui dan disinkronkan.");
       editingChecklists = null; activeTab = "settings"; renderView();
     } catch (err) {
       toast(err.message || "Gagal menyimpan checklist.");
       btn.disabled = false; btn.textContent = "Simpan Perubahan";
     }
   };
+
+  document.querySelector("#export-checklist-csv").onclick = () => {
+    collectEditorRows();
+    let csv = "Jabatan ID,Nama Jabatan,No,Area,Tugas,Frekuensi,Bobot\n";
+    for (const roleId in editingChecklists) {
+      const roleName = APP_CONFIG.members.find(r => r.id === roleId)?.name || roleId;
+      const items = editingChecklists[roleId] || [];
+      items.forEach(item => {
+        csv += `${escapeCsv(roleId)},${escapeCsv(roleName)},${item.no},${escapeCsv(item.area)},${escapeCsv(item.task)},${escapeCsv(item.frequency)},${item.weight}\n`;
+      });
+    }
+    const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "checklist-pengurus.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importInput = document.querySelector("#import-checklist-csv");
+  if (importInput) {
+    importInput.onchange = e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        try {
+          const text = ev.target.result;
+          const lines = text.split(/\r?\n/).filter(line => line.trim());
+          if (lines.length < 2) throw new Error("File CSV kosong atau tidak valid.");
+          const newChecklists = {};
+          APP_CONFIG.members.filter(r => r.id !== 'anggota').forEach(r => newChecklists[r.id] = []);
+          
+          for (let i = 1; i < lines.length; i++) {
+            const row = parseCsvLine(lines[i]);
+            if (row.length < 7) continue;
+            const roleId = row[0].trim();
+            if (!newChecklists[roleId]) newChecklists[roleId] = [];
+            newChecklists[roleId].push({
+              no: Number(row[2]) || 0,
+              area: row[3].trim(),
+              task: row[4].trim(),
+              frequency: row[5].trim(),
+              weight: Number(row[6]) || 0
+            });
+          }
+          editingChecklists = normalizeChecklistMap(newChecklists);
+          toast("Checklist berhasil diimport dari file CSV.");
+          renderEditor();
+        } catch (err) {
+          toast("Gagal memproses CSV: " + err.message);
+        }
+        importInput.value = "";
+      };
+      reader.readAsText(file);
+    };
+  }
+
   renderEditor();
 }
 function bindSettingsView(){
@@ -1520,8 +1836,7 @@ function bindSettingsView(){
     const editChkBtn = document.querySelector("#edit-checklists-btn");
     if(editChkBtn) {
       editChkBtn.onclick = () => {
-        editingChecklists = JSON.parse(JSON.stringify(APP_CONFIG.checklists));
-        APP_CONFIG.members.forEach(r => { if (!editingChecklists[r.id] && r.id !== 'anggota') editingChecklists[r.id] = []; });
+        editingChecklists = normalizeChecklistMap(JSON.parse(JSON.stringify(APP_CONFIG.checklists)));
         activeTab = "checklists-editor";
         renderView();
       };
@@ -1529,6 +1844,7 @@ function bindSettingsView(){
   }
   bindPasswordPanel();
   bindOpenCashFlowButtons();
+  bindSyncButton("#sync-data", "Sinkron & Cache Data");
   document.querySelector("#clear-data").onclick = async () => { if(confirm("Hapus semua data penilaian, akun, request sign up, arus kas, dan total SHU di browser ini?")){ state = { evaluations:{}, totalShu:0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt:null}; await saveState({ immediate: true }); toast("Data dihapus."); await renderView(); } };
 }
 async function loadServerBackups() {
@@ -1562,9 +1878,9 @@ function bindPasswordPanel(){
       const acc = activeAccount();
       if(!acc) return;
       acc.password = await hashPassword(password);
-      const saved = await saveState({ immediate: true });
+      const res = await saveState({ immediate: true });
       document.querySelector("#password-change-error").classList.add("hidden");
-      document.querySelector("#password-change-message").textContent = saved ? "Password berhasil diubah dan tersimpan ke database." : "Password diubah lokal. Sinkron database belum berhasil.";
+      document.querySelector("#password-change-message").textContent = res?.ok ? "Password berhasil diubah dan tersimpan ke database." : `Disimpan lokal. Error: ${res?.error || "Gagal sinkron"}`;
       document.querySelector("#password-change-message").classList.remove("hidden");
       passwordForm.reset();
     };
@@ -1583,9 +1899,9 @@ function bindPasswordPanel(){
       const acc = activeAccount();
       if(acc) {
         acc.password = await hashPassword(password);
-        const saved = await saveState({ immediate: true });
+        const res = await saveState({ immediate: true });
         document.querySelector("#admin-password-error").classList.add("hidden");
-        document.querySelector("#admin-password-message").textContent = saved ? "Password berhasil diubah dan tersimpan ke database." : "Password diubah lokal. Sinkron database belum berhasil.";
+        document.querySelector("#admin-password-message").textContent = res?.ok ? "Password berhasil diubah dan tersimpan ke database." : `Disimpan lokal. Error: ${res?.error || "Gagal sinkron"}`;
         document.querySelector("#admin-password-message").classList.remove("hidden");
         adminPasswordForm.reset();
       }
@@ -1595,36 +1911,19 @@ function bindPasswordPanel(){
 
 async function main() {
   try {
-    const response = await fetch(`${API_URL}?action=get_app_data`, { cache: "no-store" });
-    if (!response.ok) {
-      let errMsg = 'Gagal memuat data aplikasi dari server.';
-      try {
-        const raw = await response.text();
-        try {
-          const errData = JSON.parse(raw);
-          if (errData.error) errMsg = errData.error;
-        } catch(e) {
-          errMsg += ' Respons server: ' + raw.substring(0, 150);
-        }
-      } catch(e){}
-      throw new Error(errMsg);
-    }
-    const data = await response.json();
-    if(!data?.ok || !Array.isArray(data.members) || !data.checklists || typeof data.checklists !== "object"){
-      throw new Error(data?.error || "Format data aplikasi dari server tidak valid.");
-    }
-    APP_CONFIG.members = data.members;
-    APP_CONFIG.checklists = data.checklists;
+    await pullRemoteState({ preferRemote: true, throwOnError: !APP_CONFIG.members.length });
   } catch (error) {
     console.error("Tidak bisa memuat data awal aplikasi:", error);
-    app.innerHTML = `<div class="card error-card"><h2>Gagal Memuat Aplikasi</h2><p>Tidak dapat terhubung ke database untuk memuat data awal. Pastikan file <code>config.php</code> sudah benar dan koneksi internet stabil.</p><p class="muted">${safe(error.message)}</p></div>`;
+  }
+
+  if (!APP_CONFIG.members.length) {
+    app.innerHTML = `<div class="card error-card"><h2>Gagal Memuat Aplikasi</h2><p>Tidak dapat terhubung ke database untuk memuat data awal. Pastikan file <code>config.php</code> sudah benar dan koneksi internet stabil.</p></div>`;
     return;
   }
 
-  await pullRemoteState({ preferRemote: true });
   await render();
   setupInstallPrompt();
-  setInterval(() => pullRemoteState({ silent: false }), 2500);
+  setInterval(() => pullRemoteState({ silent: true }), 30000);
   window.addEventListener("focus", () => pullRemoteState({ silent: false }));
   document.addEventListener("visibilitychange", () => {
     if(!document.hidden) pullRemoteState({ silent: false });
