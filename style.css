@@ -20,9 +20,9 @@
 .hint-box a,.success a{color:var(--primary);font-weight:900}
 @media(max-width:620px){.auth-grid{grid-template-columns:1fr}.password-wrap{grid-template-columns:1fr 84px}.icon-btn{min-width:84px}.login-actions{align-items:flex-start;flex-direction:column}}
 
-.check-fields{grid-template-columns:1.1fr 1fr 1fr}
+.check-fields{grid-template-columns:1.3fr 1fr 1fr}
 .stars{color:#d97706;font-weight:900;letter-spacing:0}
-.rating-group{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px}
+.rating-group{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}
 .star-choice{display:grid;place-items:center;gap:2px;padding:8px 6px;border:1px solid var(--line);border-radius:12px;background:#fff;color:#92400e;font-weight:900;text-align:center;min-height:62px}
 .star-choice input{position:absolute;opacity:0;pointer-events:none}
 .star-choice span{font-size:clamp(13px,1.4vw,18px);line-height:1;white-space:nowrap}
@@ -62,7 +62,7 @@
 .cashflow-table input{min-width:112px;border:0;border-radius:0;padding:9px 10px;background:#fff}
 .cashflow-table input:focus{box-shadow:inset 0 0 0 2px var(--primary);border-color:transparent}
 @media(max-width:980px){.check-fields{grid-template-columns:1fr}}
-@media(max-width:620px){.rating-group{grid-template-columns:repeat(2,minmax(0,1fr))}.star-choice:last-child{grid-column:1/-1}.avatar{width:76px;height:76px;border-radius:20px}.mini-avatar{width:30px;height:30px;flex-basis:30px;border-radius:9px}.user-cell{gap:8px}.user-box{width:100%;display:flex;align-items:center;justify-content:flex-start;gap:8px}.user-box span{flex:1 1 100%;font-size:14px}.install-btn,#logout-btn{padding:9px 10px;font-size:14px}.topbar{gap:10px}.topbar h1{font-size:24px}}
+@media(max-width:620px){.rating-group{grid-template-columns:repeat(3,minmax(0,1fr))}.avatar{width:76px;height:76px;border-radius:20px}.mini-avatar{width:30px;height:30px;flex-basis:30px;border-radius:9px}.user-cell{gap:8px}.user-box{width:100%;display:flex;align-items:center;justify-content:flex-start;gap:8px}.user-box span{flex:1 1 100%;font-size:14px}.install-btn,#logout-btn{padding:9px 10px;font-size:14px}.topbar{gap:10px}.topbar h1{font-size:24px}}
 .detail-list{margin:10px 0 0 18px;padding:0;display:grid;gap:10px;min-width:280px}
 .detail-list li{padding-bottom:10px;border-bottom:1px solid var(--line)}
 .detail-list li:last-child{border-bottom:0;padding-bottom:0}

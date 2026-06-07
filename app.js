@@ -17,7 +17,8 @@ const RATINGS = [
     { value: 2, label: "2 Bintang", score: 40 },
     { value: 3, label: "3 Bintang", score: 60 },
     { value: 4, label: "4 Bintang", score: 80 },
-    { value: 5, label: "5 Bintang", score: 100 }
+    { value: 5, label: "5 Bintang", score: 100 },
+    { value: -1, label: "Tidak Relevan", score: null }
 ];
 
 let APP_CONFIG = {
@@ -38,6 +39,8 @@ let deferredInstallPrompt = null;
 let needsRender = false;
 let hasLoadedRemoteState = false;
 let lastAppliedRevision = "";
+let editingChecklists = null;
+let checklistCurrentRole = null;
 
 function defaultAccounts(){ return { [ADMIN_ACCOUNT.id]: { id: ADMIN_ACCOUNT.id, memberId: null, name: ADMIN_ACCOUNT.name, role: ADMIN_ACCOUNT.role, password: ADMIN_ACCOUNT.password, type: "admin", status: "approved", createdAt: new Date().toISOString(), approvedAt: new Date().toISOString() } }; }
 function loadState(){
@@ -127,6 +130,7 @@ async function hashPassword(text) {
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
 }
+
 function scheduleRemoteSave(){
   clearTimeout(remoteSaveTimer);
   remoteSaveTimer = setTimeout(pushRemoteState, 550);
@@ -190,8 +194,16 @@ async function pushRemoteState(){
     const response = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
-      body: JSON.stringify({ state })
+      body: JSON.stringify({ state, expectedRevision: lastAppliedRevision })
     });
+
+    if (response.status === 409) {
+      // Terjadi konflik! Orang lain telah menimpa data server lebih dulu.
+      toast("Gagal menyimpan: Data bertabrakan dengan pengguna lain. Memuat data terbaru...");
+      await pullRemoteState({ preferRemote: true, silent: false });
+      return false;
+    }
+
     if(!response.ok) throw new Error("Sinkron database gagal.");
     const result = await response.json().catch(() => ({}));
     remoteReady = true;
@@ -322,6 +334,7 @@ function answerRating(answer){
 }
 function ratingStars(value){
   const rating = Number(value || 0);
+  if(rating === -1) return `<span class="muted" style="font-weight:700; font-size:12px">Tidak Relevan</span>`;
   return `<span class="stars" aria-label="${rating} dari 5 bintang">${Array.from({length:5}, (_, i) => i < rating ? "★" : "☆").join("")}</span>`;
 }
 function category(value){
@@ -332,13 +345,26 @@ function category(value){
 }
 function badgeClass(cat){ return cat === "Sangat Serius" ? "good" : cat === "Serius" ? "info" : cat === "Perlu Ditingkatkan" ? "mid" : "bad"; }
 function getEvaluation(evaluatorId, targetId){
-  return state.evaluations[key(evaluatorId,targetId)] || { evaluatorId, targetId, items:{}, submittedAt:null };
+  const ev = state.evaluations[key(evaluatorId,targetId)];
+  return (ev && !ev._deleted) ? ev : { evaluatorId, targetId, items:{}, submittedAt:null };
 }
 function setEvaluation(evaluation, options = {}){
   state.evaluations[key(evaluation.evaluatorId,evaluation.targetId)] = evaluation;
+  
   return saveState(options);
 }
-function allEvaluationRows(){ return Object.values(state.evaluations || {}).filter(e => e && e.evaluatorId !== e.targetId); }
+function allEvaluationRows(){ return Object.values(state.evaluations || {}).filter(e => e && !e._deleted && e.evaluatorId !== e.targetId); }
+function isEvaluationComplete(evaluatorId) {
+  const targets = approvedChecklistAccounts().filter(acc => acc.id !== evaluatorId);
+  for (const target of targets) {
+    const items = APP_CONFIG.checklists[target.memberId] || [];
+    if (!items.length) continue;
+    const ev = getEvaluation(evaluatorId, target.id);
+    const filled = items.filter(item => answerRating(ev.items?.[item.no]) !== 0).length;
+    if (filled < items.length) return false;
+  }
+  return true;
+}
 function calculateTarget(targetId, roleId){
   const items = APP_CONFIG.checklists[roleId];
   if (!items) {
@@ -378,15 +404,30 @@ function registeredShuRows(){
   const users = registeredUsers();
   const pengurusUsers = users.filter(acc => acc.role !== "Anggota" && acc.memberId);
   const anggota = users.filter(acc => acc.role === "Anggota");
-  const totalSeriousness = pengurusUsers.reduce((sum, acc) => sum + (calculateTarget(acc.id, acc.memberId).seriousness || 0), 0);
   const distribution = normalizeShuDistribution(state.shuDistribution);
-  const nonMemberRows = pengurusUsers.map(acc => {
+  
+  const pengurusData = pengurusUsers.map(acc => {
     const base = calculateTarget(acc.id, acc.memberId);
-    base.shuPct = totalSeriousness > 0 ? (base.seriousness / totalSeriousness) * distribution.pengurus : (pengurusUsers.length > 0 ? distribution.pengurus / pengurusUsers.length : 0);
-    return { ...base, member: { id: acc.id, name: acc.name, role: acc.role }, account: acc, shuPct: base.shuPct || 0, shuNominal: (state.totalShu || 0) * (base.shuPct || 0) };
+    const eligible = isEvaluationComplete(acc.id);
+    return { ...base, member: { id: acc.id, name: acc.name, role: acc.role }, account: acc, eligible };
   });
+
+  const eligiblePengurus = pengurusData.filter(p => p.eligible);
+  const totalSeriousness = eligiblePengurus.reduce((sum, p) => sum + (p.seriousness || 0), 0);
+
+  const nonMemberRows = pengurusData.map(p => {
+    if (!p.eligible) {
+      p.shuPct = 0;
+      p.shuNominal = 0;
+    } else {
+      p.shuPct = totalSeriousness > 0 ? (p.seriousness / totalSeriousness) * distribution.pengurus : (eligiblePengurus.length > 0 ? distribution.pengurus / eligiblePengurus.length : 0);
+      p.shuNominal = (state.totalShu || 0) * (p.shuPct || 0);
+    }
+    return p;
+  });
+
   const anggotaPct = anggota.length ? distribution.anggota / anggota.length : 0;
-  const anggotaRows = anggota.map(acc => ({ targetId: acc.id, member: { id: acc.id, name: acc.name, role: "Anggota" }, account: acc, evaluatorCount: 0, seriousness: 0, category: "Anggota", completed: 0, progress: 0, pending: 0, shuPct: anggotaPct, shuNominal: (state.totalShu || 0) * anggotaPct }));
+  const anggotaRows = anggota.map(acc => ({ targetId: acc.id, member: { id: acc.id, name: acc.name, role: "Anggota" }, account: acc, evaluatorCount: 0, seriousness: 0, category: "Anggota", completed: 0, progress: 0, pending: 0, shuPct: anggotaPct, shuNominal: (state.totalShu || 0) * anggotaPct, eligible: true }));
   return [...nonMemberRows, ...anggotaRows];
 }
 function registeredDashboardRows(){
@@ -608,6 +649,7 @@ function renderView(){
   if(activeTab === "evaluations") view.innerHTML = evaluationsView();
   if(activeTab === "shu") { view.innerHTML = shuView(); bindShuView(); }
   if(activeTab === "settings") { view.innerHTML = settingsView(); bindSettingsView(); }
+  if(activeTab === "checklists-editor") { view.innerHTML = checklistEditorView(); bindChecklistEditorView(); }
 }
 function dashboardView(){
   const rows = registeredDashboardRows();
@@ -617,7 +659,28 @@ function dashboardView(){
   const evalCount = allEvaluationRows().length;
   const showRules = isChecklistMember(activeUser);
   const openFileButton = state.cashFlow?.fileDataUrl ? `<button class="ghost open-cashflow-file" type="button">Buka File Arus Kas</button>` : "";
-  return `<div class="grid cards">
+  
+  let alertHtml = "";
+  if (showRules) {
+    const targets = approvedChecklistAccounts().filter(acc => acc.id !== activeUser);
+    let incomplete = [];
+    targets.forEach(target => {
+      const items = APP_CONFIG.checklists[target.memberId] || [];
+      if(!items.length) return;
+      const ev = getEvaluation(activeUser, target.id);
+      const filled = items.filter(item => answerRating(ev.items?.[item.no]) !== 0).length;
+      if (filled < items.length) {
+        incomplete.push(`${safe(target.name)} (${filled}/${items.length})`);
+      }
+    });
+    if (incomplete.length > 0) {
+      alertHtml = `<div class="note" style="margin-bottom:18px; background:#fef2f2; border-color:#fca5a5; color:#991b1b;"><div style="margin-bottom:10px;"><strong>Tugas Penilaian Belum Selesai!</strong> Anda belum mengisi penuh checklist untuk: <strong>${incomplete.join(", ")}</strong>.</div><button class="ghost" onclick="document.querySelector('[data-tab=\\'input\\']').click();" style="border-color:#fca5a5; color:#991b1b; padding:6px 12px; font-size:13px;">Lanjutkan Penilaian</button></div>`;
+    } else if (targets.length > 0) {
+      alertHtml = `<div class="note" style="margin-bottom:18px; background:#f0fdf4; border-color:#bbf7d0; color:#166534;"><strong>Terima kasih!</strong> Anda telah menyelesaikan 100% penilaian untuk semua rekan pengurus.</div>`;
+    }
+  }
+
+  return `${alertHtml}<div class="grid cards">
     <article class="card metric"><span>User Approved</span><strong>${registeredUsers().length}</strong></article>
     <article class="card metric"><span>Rata-rata Keseriusan</span><strong>${pct(avg)}</strong></article>
     <article class="card metric"><span>Nilai Tertinggi</span><strong>${top ? safe(top.member.name) : "-"}</strong><small>${top ? pct(top.seriousness) : ""}</small></article>
@@ -695,8 +758,8 @@ function bindProfileView(){
   bindPasswordPanel();
 }
 function summaryTable(rows, withShu){
-  return `<table><thead><tr><th>Nama</th><th>Jabatan</th><th>Evaluator</th><th>Nilai</th><th>Kategori</th>${withShu?'<th>Persentase SHU</th><th>Nominal SHU</th>':''}<th>Progress</th></tr></thead><tbody>${rows.map(r=>`
-    <tr><td><strong>${safe(r.member.name)}</strong></td><td>${safe(r.member.role)}</td><td>${r.evaluatorCount}/${Math.max(0, getEvaluatableMembers().length - 1)}</td><td><strong>${pct(r.seriousness)}</strong></td><td><span class="badge ${badgeClass(r.category)}">${r.category}</span></td>${withShu?`<td>${pct(r.shuPct)}</td><td class="currency">${rupiah(r.shuNominal)}</td>`:''}<td><div class="progress"><i style="width:${Math.round(r.seriousness*100)}%"></i></div></td></tr>`).join("")}</tbody></table>`;
+  return `<table><thead><tr><th>Pengurus</th><th>Evaluator</th><th>Nilai</th><th>Kategori</th>${withShu?'<th>Persentase SHU</th><th>Nominal SHU</th>':''}<th>Progress</th></tr></thead><tbody>${rows.map(r=>`
+    <tr><td><div class="user-cell">${accountAvatar(r.account, true)}<div><strong>${safe(r.member.name)}</strong><br><span class="muted" style="font-size:12px">${safe(r.member.role)}</span></div></div></td><td>${r.evaluatorCount}/${Math.max(0, getEvaluatableMembers().length - 1)}</td><td><strong>${pct(r.seriousness)}</strong></td><td><span class="badge ${badgeClass(r.category)}">${r.category}</span></td>${withShu?`<td>${r.eligible === false ? '<span class="badge bad" style="font-size:11px" title="Belum 100% menilai pengurus lain">Dicabut</span>' : pct(r.shuPct)}</td><td class="currency">${r.eligible === false ? 'Rp 0' : rupiah(r.shuNominal)}</td>`:''}<td><div class="progress"><i style="width:${Math.round(r.seriousness*100)}%"></i></div></td></tr>`).join("")}</tbody></table>`;
 }
 function inputView(){
   if(!isChecklistMember(activeUser)) return `<section class="card"><h2>Akses Anggota</h2><p class="muted">Akun anggota tidak memiliki akses pengisian checklist pengurus.</p></section>`;
@@ -706,19 +769,25 @@ function inputView(){
   const targetAccount = account(selectedTarget);
   const roleData = getRoleData(targetAccount.memberId);
   const ev = getEvaluation(activeUser, targetAccount.id);
-  const items = APP_CONFIG.checklists[targetAccount.memberId];
+  const items = APP_CONFIG.checklists[targetAccount.memberId] || [];
   return `<section class="card">
     <h2>Isi Checklist Pengurus Lain</h2>
     <p class="muted">Login sebagai <strong>${safe(activeAccount().name)}</strong>. Target penilaian hanya user pengurus yang sudah approved admin.</p>
-    <div class="member-picker">${targets.map(acc => `<button class="member-card ${acc.id===selectedTarget?'active':''}" data-target="${acc.id}"><strong>${safe(acc.name)}</strong><br><span class="muted">${safe(acc.role)}</span></button>`).join("")}</div>
+    <div class="member-picker">${targets.map(acc => {
+      const cItems = APP_CONFIG.checklists[acc.memberId] || [];
+      const cEv = getEvaluation(activeUser, acc.id);
+      const filled = cItems.filter(item => answerRating(cEv.items?.[item.no]) !== 0).length;
+      const badge = cItems.length > 0 && filled === cItems.length ? '<span class="badge good" style="margin-top:6px; display:inline-block">Selesai 100%</span>' : `<span class="badge ${filled > 0 ? 'mid' : 'bad'}" style="margin-top:6px; display:inline-block">${filled}/${cItems.length} Terisi</span>`;
+      return `<button class="member-card ${acc.id===selectedTarget?'active':''}" data-target="${acc.id}"><strong>${safe(acc.name)}</strong><br><span class="muted">${safe(acc.role)}</span><br>${badge}</button>`;
+    }).join("")}</div>
   </section>
   <section class="card" style="margin-top:18px">
     <div class="toolbar"><div><h2>Checklist: ${safe(targetAccount.name)}</h2><p class="muted">${safe(targetAccount.role)} | Fokus: ${safe(roleData?.focus)}</p></div><div class="actions"><button id="save-checklist" class="primary">Simpan Checklist</button><button id="reset-current" class="ghost">Kosongkan Form Ini</button></div></div>
-    <form id="checklist-form" class="checklist-form">${items.map(item => {
+    ${items.length ? `<form id="checklist-form" class="checklist-form">${items.map(item => {
       const ans = ev.items[item.no] || {};
       const rating = answerRating(ans);
-      return `<article class="check-item"><div class="check-num">${item.no}</div><div><h3>${safe(item.task)}</h3><p class="muted">Area: ${safe(item.area)} • Frekuensi: ${safe(item.frequency)} • Bobot: ${item.weight}</p><div class="check-fields"><div class="field-label"><span>Nilai Bintang</span><div class="rating-group" role="radiogroup" aria-label="Nilai untuk ${safe(item.task)}">${ratingOptions().map(rate=>`<label class="star-choice"><input type="radio" name="rating-${item.no}" value="${rate.value}" ${rating===rate.value?'checked':''}><span>${"★".repeat(rate.value)}</span><small>${rate.score}</small></label>`).join("")}</div></div><div class="field-label"><span>Bukti / Link</span><input name="proof-${item.no}" value="${safe(ans.proof||"")}" placeholder="Tempel link bukti bila ada" /><div class="upload-actions"><label class="file-picker" for="file-${item.no}">Pilih File<input id="file-${item.no}" name="file-${item.no}" type="file" accept="image/*" /></label><label class="file-picker" for="camera-${item.no}">Kamera<input id="camera-${item.no}" name="camera-${item.no}" type="file" accept="image/*" capture="environment" /></label></div>${proofPreview(ans)}</div><label>Catatan Evaluasi<textarea name="note-${item.no}" placeholder="Catatan singkat">${safe(ans.note||"")}</textarea></label></div></div></article>`;
-    }).join("")}</form>
+      return `<article class="check-item"><div class="check-num">${item.no}</div><div><h3>${safe(item.task)}</h3><p class="muted">Area: ${safe(item.area)} • Frekuensi: ${safe(item.frequency)} • Bobot: ${item.weight}</p><div class="check-fields"><div class="field-label"><span>Nilai Bintang</span><div class="rating-group" role="radiogroup" aria-label="Nilai untuk ${safe(item.task)}">${ratingOptions().map(rate=>`<label class="star-choice" ${rate.value===-1?'style="background:#f8fafc"':''}><input type="radio" name="rating-${item.no}" value="${rate.value}" ${rating===rate.value?'checked':''}><span>${rate.value > 0 ? "★".repeat(rate.value) : "—"}</span><small>${rate.score !== null ? rate.score : "N/A"}</small></label>`).join("")}</div></div><div class="field-label"><span>Bukti / Link</span><input name="proof-${item.no}" value="${safe(ans.proof||"")}" placeholder="Tempel link bukti bila ada" /><div class="upload-actions"><label class="file-picker" for="file-${item.no}">Pilih File<input id="file-${item.no}" name="file-${item.no}" type="file" accept="image/*" /></label><label class="file-picker" for="camera-${item.no}">Kamera<input id="camera-${item.no}" name="camera-${item.no}" type="file" accept="image/*" capture="environment" /></label></div>${proofPreview(ans)}</div><label>Catatan Evaluasi<textarea name="note-${item.no}" placeholder="Catatan singkat">${safe(ans.note||"")}</textarea></label></div></div></article>`;
+    }).join("")}</form>` : '<div class="empty">Data checklist untuk role ini belum tersedia di database.</div>'}
     <p class="footer-note">Terakhir disimpan: ${ev.submittedAt ? new Date(ev.submittedAt).toLocaleString('id-ID') : 'belum pernah'}</p>
   </section>`;
 }
@@ -762,7 +831,7 @@ async function bindInputView(){
     const items = {};
     const current = getEvaluation(activeUser, selectedTarget);
     try {
-      for(const item of APP_CONFIG.checklists[targetMember.memberId]){
+      for(const item of APP_CONFIG.checklists[targetMember.memberId] || []){
         const existing = current.items[item.no] || {};
         const file = form[`file-${item.no}`].files[0] || form[`camera-${item.no}`].files[0];
         const proofFile = file ? await convertImageToWebp(file) : existing.proofFile || null;
@@ -780,30 +849,56 @@ async function bindInputView(){
   };
   document.querySelector("#reset-current").onclick = () => {
     if(confirm("Kosongkan penilaian Anda untuk pengurus ini?")){
-      delete state.evaluations[key(activeUser,selectedTarget)];
+      state.evaluations[key(activeUser,selectedTarget)] = { _deleted: true, timestamp: Date.now() };
       saveState({ immediate: true }).then(saved => toast(saved ? "Penilaian dikosongkan dan tersimpan ke database." : "Penilaian dikosongkan lokal. Sinkron database belum berhasil."));
       renderView();
     }
   };
 }
 function evaluationsView(){
-  const rows = allEvaluationRows().sort((a,b)=>(b.submittedAt||"").localeCompare(a.submittedAt||""));
-  return `<section class="card"><div class="toolbar"><div><h2>Hasil Penilaian</h2><p class="muted">User hanya melihat hasil penilaian tanpa identitas pemberi nilai.</p></div></div>${rows.length?`<div class="table-wrap"><table><thead><tr><th>Dinilai</th><th>Tanggal</th><th>Ringkasan Nilai</th></tr></thead><tbody>${rows.map(ev=>evaluationRow(ev, false)).join("")}</tbody></table></div>`:'<div class="empty">Belum ada checklist yang disimpan.</div>'}</section>`;
+  const all = allEvaluationRows().sort((a,b)=>(b.submittedAt||"").localeCompare(a.submittedAt||""));
+  const forMe = all.filter(ev => ev.targetId === activeUser);
+  const byMe = all.filter(ev => ev.evaluatorId === activeUser);
+  const others = all.filter(ev => ev.targetId !== activeUser && ev.evaluatorId !== activeUser);
+
+  const renderTable = (rows) => {
+    if(!rows.length) return '<div class="empty" style="padding:20px">Belum ada data penilaian.</div>';
+    return `<div class="table-wrap"><table><thead><tr><th>Dinilai</th><th>Tanggal</th><th>Ringkasan Nilai</th><th>Detail Checklist</th></tr></thead><tbody>${rows.map(ev=>evaluationRow(ev, false)).join("")}</tbody></table></div>`;
+  };
+
+  return `<div class="grid two">
+    <section class="card">
+      <div class="toolbar"><div><h2>Penilaian Terhadap Saya</h2><p class="muted">Hasil evaluasi dari rekan pengurus (anonim).</p></div></div>
+      ${renderTable(forMe)}
+    </section>
+    <section class="card">
+      <div class="toolbar"><div><h2>Penilaian yang Saya Berikan</h2><p class="muted">Riwayat checklist yang Anda isi untuk pengurus lain.</p></div></div>
+      ${renderTable(byMe)}
+    </section>
+  </div>
+  <section class="card" style="margin-top:18px">
+    <div class="toolbar"><div><h2>Penilaian Pengurus Lain</h2><p class="muted">Aktivitas penilaian antar pengurus lain secara anonim.</p></div></div>
+    ${renderTable(others)}
+  </section>`;
 }
 function evaluationRow(ev, showEvaluator = true){
   const targetAccount = account(ev.targetId);
   const evaluatorAccount = account(ev.evaluatorId);
-  const counts = {1:0,2:0,3:0,4:0,5:0};
+  const counts = {1:0,2:0,3:0,4:0,5:0,"-1":0};
   Object.values(ev.items||{}).forEach(a => { const rating = answerRating(a); if(counts[rating] !== undefined) counts[rating]++; });
   const proofCount = Object.values(ev.items||{}).filter(a => a.proof || a.proofFile).length;
-  const resultCells = `<td>${safe(targetAccount?.name)}</td><td>${ev.submittedAt ? new Date(ev.submittedAt).toLocaleString('id-ID') : '-'}</td><td>${[5,4,3,2,1].map(rate => `${ratingStars(rate)}: ${counts[rate]}`).join("<br>")}<br>Bukti: ${proofCount}</td>`;
-  return showEvaluator ? `<tr><td><strong>${safe(evaluatorAccount?.name)}</strong></td>${resultCells}<td>${evaluationChecklistDetail(ev)}</td></tr>` : `<tr>${resultCells}</tr>`;
+  
+  const targetCell = targetAccount ? `<div class="user-cell">${accountAvatar(targetAccount, true)}<div><strong>${safe(targetAccount.name)}</strong><br><span class="muted" style="font-size:12px">${safe(targetAccount.role)}</span></div></div>` : `<span class="muted">User Dihapus</span>`;
+  const evaluatorCell = evaluatorAccount ? `<div class="user-cell">${accountAvatar(evaluatorAccount, true)}<div><strong>${safe(evaluatorAccount.name)}</strong><br><span class="muted" style="font-size:12px">${safe(evaluatorAccount.role)}</span></div></div>` : `<span class="muted">User Dihapus</span>`;
+
+  const resultCells = `<td>${targetCell}</td><td>${ev.submittedAt ? new Date(ev.submittedAt).toLocaleString('id-ID') : '-'}</td><td>${[5,4,3,2,1].map(rate => `${ratingStars(rate)}: ${counts[rate]}`).join("<br>")}${counts["-1"] ? `<br><span class="muted" style="font-weight:700;font-size:12px">Tidak Relevan: ${counts["-1"]}</span>` : ""}<br>Bukti: ${proofCount}</td><td>${evaluationChecklistDetail(ev)}</td>`;
+  return showEvaluator ? `<tr><td>${evaluatorCell}</td>${resultCells}</tr>` : `<tr>${resultCells}</tr>`;
 }
 function evaluationChecklistDetail(ev){
   const targetAccount = account(ev.targetId);
   const checklist = APP_CONFIG.checklists[targetAccount?.memberId] || [];
   if(!checklist.length) return `<span class="muted">Checklist role tidak ditemukan.</span>`;
-  const filled = checklist.filter(item => answerRating(ev.items?.[item.no]) > 0).length;
+  const filled = checklist.filter(item => answerRating(ev.items?.[item.no]) !== 0).length;
   const rows = checklist.map(item => {
     const answer = ev.items?.[item.no] || {};
     const rating = answerRating(answer);
@@ -816,7 +911,7 @@ function evaluationChecklistDetail(ev){
 function shuView(){
   const rows = registeredShuRows();
   const distribution = normalizeShuDistribution(state.shuDistribution);
-  return `<section class="card"><div class="toolbar"><div><h2>Pembagian SHU Otomatis</h2><p class="muted">Pengurus mendapat ${pct(distribution.pengurus)} SHU berdasarkan proporsi nilai. Anggota mendapat ${pct(distribution.anggota)} SHU, dibagi rata jika lebih dari satu anggota approved.</p></div><button class="ghost" onclick="window.print()">Cetak</button></div><label style="max-width:360px">Input Total SHU<span class="rupiah-wrap"><span>Rp</span><input id="total-shu" type="text" inputmode="numeric" autocomplete="off" value="${rupiahInput(state.totalShu)}" placeholder="0" /></span></label><div id="shu-table">${rows.length ? `<div class="table-wrap" style="margin-top:16px">${summaryTable(rows, true)}</div>` : '<div class="empty">Belum ada user approved untuk pembagian SHU.</div>'}</div></section>`;
+  return `<section class="card"><div class="toolbar"><div><h2>Pembagian SHU Otomatis</h2><p class="muted">Pengurus mendapat ${pct(distribution.pengurus)} SHU berdasarkan proporsi nilai. Anggota mendapat ${pct(distribution.anggota)} SHU, dibagi rata jika lebih dari satu anggota approved. <strong style="color:var(--danger)">Pengurus yang belum 100% menilai rekannya dicabut hak SHU-nya.</strong></p></div><button class="ghost" onclick="window.print()">Cetak</button></div><label style="max-width:360px">Input Total SHU<span class="rupiah-wrap"><span>Rp</span><input id="total-shu" type="text" inputmode="numeric" autocomplete="off" value="${rupiahInput(state.totalShu)}" placeholder="0" /></span></label><div id="shu-table">${rows.length ? `<div class="table-wrap" style="margin-top:16px">${summaryTable(rows, true)}</div>` : '<div class="empty">Belum ada user approved untuk pembagian SHU.</div>'}</div></section>`;
 }
 function bindShuView(){
   const input = document.querySelector("#total-shu");
@@ -1147,7 +1242,7 @@ function adminView(){
   </section>`;
 }
 function visibleAccounts(){
-  return Object.values(state.accounts || {}).filter(acc => acc.id !== ADMIN_ACCOUNT.id);
+  return Object.values(state.accounts || {}).filter(acc => acc && !acc._deleted && acc.id !== ADMIN_ACCOUNT.id);
 }
 function userManagementSection(){
   return `<section class="card" style="margin-top:18px">
@@ -1234,10 +1329,12 @@ async function deleteUser(id){
   const acc = account(id);
   if(!acc) return;
   if(!confirm(`Hapus user ${acc.name}?`)) return;
-  delete state.accounts[id];
+  state.accounts[id] = { _deleted: true, id, timestamp: Date.now() };
   Object.keys(state.evaluations || {}).forEach(evKey => {
     const ev = state.evaluations[evKey];
-    if(ev?.evaluatorId === id || ev?.targetId === id) delete state.evaluations[evKey];
+    if(ev && !ev._deleted && (ev.evaluatorId === id || ev.targetId === id)) {
+      state.evaluations[evKey] = { _deleted: true, id: evKey, timestamp: Date.now() };
+    }
   });
   state.passwordRequests = (state.passwordRequests || []).filter(req => req.accountId !== id);
   if(activeUser === id){
@@ -1273,7 +1370,127 @@ function settingsView(){
   const adminUserPanel = isAdmin() ? userManagementSection() : "";
   const openFileButton = state.cashFlow?.fileDataUrl ? `<button class="ghost open-cashflow-file" type="button">Buka File Arus Kas</button>` : "";
   const backupPanel = isAdmin() ? `<section class="card" style="margin-top:18px"><div class="toolbar"><div><h2>Backup Database Server</h2><p class="muted">Daftar file backup database (.sql) yang dibuat otomatis oleh server atau secara manual.</p></div><button id="generate-backup" class="primary" type="button">Buat Backup Sekarang</button></div><div id="backup-list"><div class="empty">Memuat data backup...</div></div></section>` : "";
-  return `<section class="card"><h2>Pengaturan</h2><div class="grid two"><div><h3>Data Database</h3><p class="muted">Data disimpan ke MySQL melalui <code>api.php</code>, dengan salinan cadangan di browser jika koneksi database belum tersedia.</p><div class="actions">${openFileButton}<button id="clear-data" class="danger">Hapus Semua Data</button></div></div><div><h3>Akun Aktif</h3><div class="user-cell settings-user">${accountAvatar(acc, true)}<p><strong>${safe(acc?.name || "-")}</strong><br><span class="muted">${safe(acc?.role || "-")}</span></p></div><p class="muted">Pengurus dan anggota dibuat melalui sign up, lalu diverifikasi admin.</p><p class="muted">Status sinkron database: ${remoteReady ? "aktif" : "menunggu koneksi API"}.</p></div></div></section>${adminUserPanel}${backupPanel}${passwordPanel}`;
+  const checklistPanel = isAdmin() ? `<section class="card" style="margin-top:18px"><div class="toolbar"><div><h2>Manajemen Checklist</h2><p class="muted">Edit tugas, area, frekuensi, dan bobot checklist untuk setiap jabatan pengurus secara langsung.</p></div><button id="edit-checklists-btn" class="primary" type="button">Edit Checklist</button></div></section>` : "";
+  return `<section class="card"><h2>Pengaturan</h2><div class="grid two"><div><h3>Data Database</h3><p class="muted">Data disimpan ke MySQL melalui <code>api.php</code>, dengan salinan cadangan di browser jika koneksi database belum tersedia.</p><div class="actions">${openFileButton}<button id="clear-data" class="danger">Hapus Semua Data</button></div></div><div><h3>Akun Aktif</h3><div class="user-cell settings-user">${accountAvatar(acc, true)}<p><strong>${safe(acc?.name || "-")}</strong><br><span class="muted">${safe(acc?.role || "-")}</span></p></div><p class="muted">Pengurus dan anggota dibuat melalui sign up, lalu diverifikasi admin.</p><p class="muted">Status sinkron database: ${remoteReady ? "aktif" : "menunggu koneksi API"}.</p></div></div></section>${adminUserPanel}${checklistPanel}${backupPanel}${passwordPanel}`;
+}
+function checklistEditorView() {
+  const roles = APP_CONFIG.members.filter(r => r.id !== 'anggota');
+  if (!checklistCurrentRole || !roles.find(r => r.id === checklistCurrentRole)) checklistCurrentRole = roles[0]?.id;
+  let html = `<section class="card"><div class="toolbar"><div><h2>Edit Checklist Pengurus</h2><p class="muted">Ubah data checklist. Pastikan total bobot setiap jabatan sesuai.</p></div><div class="actions"><button id="save-checklists-btn" class="primary">Simpan Perubahan</button><button id="cancel-checklists-btn" class="ghost">Batal</button></div></div>`;
+  html += `<div class="checklist-editor-tabs" style="display:flex;gap:8px;margin-bottom:16px;overflow-x:auto;">`;
+  roles.forEach((r) => {
+    html += `<button class="role-tab-btn ${r.id === checklistCurrentRole ? 'primary' : 'ghost'}" data-role="${r.id}" style="border-radius:999px;">${safe(r.name)}</button>`;
+  });
+  html += `<button id="add-role-btn" class="ghost" style="border-radius:999px; white-space:nowrap;" type="button">+ Tambah Jabatan</button>`;
+  html += `</div><div id="checklist-editor-content"></div></section>`;
+  return html;
+}
+function bindChecklistEditorView() {
+  const content = document.querySelector("#checklist-editor-content");
+  function renderEditor() {
+    const items = editingChecklists[checklistCurrentRole] || [];
+    let html = `<div class="table-wrap"><table><thead><tr><th>No</th><th>Area</th><th>Tugas</th><th>Frekuensi</th><th>Bobot</th><th>Aksi</th></tr></thead><tbody>`;
+    items.forEach((item, index) => {
+      html += `<tr>
+        <td><input type="number" class="ce-no" data-idx="${index}" value="${item.no}" style="width:60px;min-width:60px;padding:8px"></td>
+        <td><input type="text" class="ce-area" data-idx="${index}" value="${safe(item.area)}" style="min-width:140px;padding:8px"></td>
+        <td><textarea class="ce-task" data-idx="${index}" style="min-height:40px;min-width:220px;padding:8px">${safe(item.task)}</textarea></td>
+        <td><input type="text" class="ce-freq" data-idx="${index}" value="${safe(item.frequency)}" style="min-width:100px;padding:8px"></td>
+        <td><input type="number" class="ce-weight" data-idx="${index}" value="${item.weight}" style="width:80px;min-width:80px;padding:8px"></td>
+        <td><button class="danger ce-del" data-idx="${index}" type="button">Hapus</button></td>
+      </tr>`;
+    });
+    const totalWeight = items.reduce((sum, item) => sum + Number(item.weight), 0);
+    const weightColor = totalWeight === 100 ? "var(--ok)" : (totalWeight > 100 ? "var(--danger)" : "var(--warn)");
+    html += `</tbody></table></div><div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px;"><button class="ghost ce-add" type="button">+ Tambah Item</button><strong style="color:${weightColor}">Total Bobot: ${totalWeight}</strong></div>`;
+    content.innerHTML = html;
+    content.querySelectorAll(".ce-no").forEach(i => i.onchange = e => { editingChecklists[checklistCurrentRole][e.target.dataset.idx].no = Number(e.target.value); });
+    content.querySelectorAll(".ce-area").forEach(i => i.onchange = e => { editingChecklists[checklistCurrentRole][e.target.dataset.idx].area = e.target.value; });
+    content.querySelectorAll(".ce-task").forEach(i => i.onchange = e => { editingChecklists[checklistCurrentRole][e.target.dataset.idx].task = e.target.value; });
+    content.querySelectorAll(".ce-freq").forEach(i => i.onchange = e => { editingChecklists[checklistCurrentRole][e.target.dataset.idx].frequency = e.target.value; });
+    content.querySelectorAll(".ce-weight").forEach(i => i.onchange = e => { editingChecklists[checklistCurrentRole][e.target.dataset.idx].weight = Number(e.target.value); });
+    content.querySelectorAll(".ce-del").forEach(b => b.onclick = e => { editingChecklists[checklistCurrentRole].splice(e.target.dataset.idx, 1); renderEditor(); });
+    content.querySelector(".ce-add").onclick = () => {
+      const nextNo = items.length ? Math.max(...items.map(i=>i.no)) + 1 : 1;
+      editingChecklists[checklistCurrentRole].push({ no: nextNo, area: "", task: "", frequency: "Mingguan", weight: 10 });
+      renderEditor();
+    };
+  }
+  document.querySelectorAll(".role-tab-btn").forEach(btn => {
+    btn.onclick = () => {
+      checklistCurrentRole = btn.dataset.role;
+      document.querySelectorAll(".role-tab-btn").forEach(b => { b.classList.remove("primary"); b.classList.add("ghost"); });
+      btn.classList.remove("ghost");
+      btn.classList.add("primary");
+      renderEditor();
+    };
+  });
+  document.querySelector("#add-role-btn").onclick = async () => {
+    const name = prompt("Nama Jabatan Pendek (contoh: Wakil Ketua):");
+    if (!name) return;
+    const role = prompt("Nama Panjang Jabatan (contoh: Wakil Ketua Pengurus):", name);
+    if (!role) return;
+    const focus = prompt("Fokus Tugas (contoh: Membantu ketua):", "-");
+    if (!focus) return;
+
+    const id = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (APP_CONFIG.members.find(r => r.id === id)) {
+      toast("ID Jabatan sudah ada, gunakan nama lain!");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_URL}?action=add_role`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, name, role, focus })
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error);
+      
+      APP_CONFIG.members.push({ id, name, role, focus });
+      editingChecklists[id] = [];
+      APP_CONFIG.checklists[id] = [];
+      checklistCurrentRole = id;
+      
+      toast("Jabatan baru berhasil ditambahkan.");
+      renderView();
+    } catch (err) {
+      toast(err.message || "Gagal menambah jabatan.");
+    }
+  };
+  document.querySelector("#cancel-checklists-btn").onclick = () => { editingChecklists = null; activeTab = "settings"; renderView(); };
+  document.querySelector("#save-checklists-btn").onclick = async () => {
+    let invalidRoles = [];
+    for (const role in editingChecklists) {
+      if (editingChecklists[role].length > 0) {
+        const total = editingChecklists[role].reduce((sum, item) => sum + Number(item.weight), 0);
+        if (total !== 100) {
+          const roleName = APP_CONFIG.members.find(r => r.id === role)?.name || role;
+          invalidRoles.push(roleName);
+        }
+      }
+    }
+    if (invalidRoles.length > 0) {
+      if (!confirm(`Peringatan: Total bobot checklist untuk jabatan berikut tidak sama dengan 100:\n- ${invalidRoles.join("\n- ")}\n\nApakah Anda yakin ingin tetap menyimpan?`)) {
+        return;
+      }
+    }
+    const btn = document.querySelector("#save-checklists-btn");
+    btn.disabled = true; btn.textContent = "Menyimpan...";
+    try {
+      const res = await fetch(`${API_URL}?action=save_checklists`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ checklists: editingChecklists }) });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error);
+      toast("Checklist berhasil diperbarui.");
+      APP_CONFIG.checklists = JSON.parse(JSON.stringify(editingChecklists));
+      editingChecklists = null; activeTab = "settings"; renderView();
+    } catch (err) {
+      toast(err.message || "Gagal menyimpan checklist.");
+      btn.disabled = false; btn.textContent = "Simpan Perubahan";
+    }
+  };
+  renderEditor();
 }
 function bindSettingsView(){
   if(isAdmin()) {
@@ -1298,6 +1515,15 @@ function bindSettingsView(){
           genBtn.disabled = false;
           genBtn.textContent = oldText;
         }
+      };
+    }
+    const editChkBtn = document.querySelector("#edit-checklists-btn");
+    if(editChkBtn) {
+      editChkBtn.onclick = () => {
+        editingChecklists = JSON.parse(JSON.stringify(APP_CONFIG.checklists));
+        APP_CONFIG.members.forEach(r => { if (!editingChecklists[r.id] && r.id !== 'anggota') editingChecklists[r.id] = []; });
+        activeTab = "checklists-editor";
+        renderView();
       };
     }
   }
@@ -1402,6 +1628,15 @@ async function main() {
   window.addEventListener("focus", () => pullRemoteState({ silent: false }));
   document.addEventListener("visibilitychange", () => {
     if(!document.hidden) pullRemoteState({ silent: false });
+  });
+
+  window.addEventListener("offline", () => {
+    toast("Koneksi terputus. Aplikasi berjalan dalam mode offline.");
+  });
+
+  window.addEventListener("online", () => {
+    toast("Koneksi internet kembali. Menyinkronkan data...");
+    pushRemoteState().then(() => pullRemoteState({ silent: false }));
   });
 
   document.addEventListener("focusout", () => {

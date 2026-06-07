@@ -1,7 +1,8 @@
 <?php
 declare(strict_types=1);
 
-ini_set('display_errors', '0');
+ini_set('display_errors', '1');
+error_reporting(E_ALL);
 ob_start();
 
 require __DIR__ . '/config.php';
@@ -18,6 +19,30 @@ function json_response(array $payload, int $status = 200): void
     echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
+
+// --- PROTEKSI DOMAIN (CORS & Anti-Hotlinking) ---
+$allowed_domain = 'mak.indosejuk.my.id';
+$allowed_origin = 'https://' . $allowed_domain;
+
+// Pengecualian: Izinkan localhost jika kamu sedang testing aplikasi di komputermu sendiri
+$is_localhost = in_array($_SERVER['HTTP_HOST'] ?? '', ['localhost', 'localhost:8000', '127.0.0.1:8000']);
+
+if (!$is_localhost) {
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+    $referer = $_SERVER['HTTP_REFERER'] ?? '';
+
+    if ($host !== $allowed_domain) {
+        json_response(['ok' => false, 'error' => 'Akses Ditolak: Host tidak diizinkan.'], 403);
+    }
+    if ($origin !== '' && $origin !== $allowed_origin) {
+        json_response(['ok' => false, 'error' => 'Akses Ditolak: Origin tidak diizinkan.'], 403);
+    }
+    if ($referer !== '' && strpos($referer, $allowed_origin . '/') !== 0 && $referer !== $allowed_origin) {
+        json_response(['ok' => false, 'error' => 'Akses Ditolak: Referer tidak diizinkan.'], 403);
+    }
+}
+// ------------------------------------------------
 
 function ensure_state_table(): void
 {
@@ -156,19 +181,148 @@ function get_app_data_response(): void
     $checklist_stmt = db()->query('SELECT role_id, no, area, task, frequency, weight FROM app_checklist_items ORDER BY role_id ASC, no ASC');
     $checklist_items = $checklist_stmt ? $checklist_stmt->fetchAll(PDO::FETCH_ASSOC) : [];
 
-    $checklists = [];
+    $checklists = new stdClass();
     foreach ($checklist_items as $item) {
         $role_id = $item['role_id'];
         unset($item['role_id']);
         $item['no'] = (int) $item['no'];
         $item['weight'] = (int) $item['weight'];
-        if (!isset($checklists[$role_id])) {
-            $checklists[$role_id] = [];
+        if (!isset($checklists->$role_id)) {
+            $checklists->$role_id = [];
         }
-        $checklists[$role_id][] = $item;
+        $checklists->$role_id[] = $item;
     }
 
     json_response(['ok' => true, 'members' => $roles, 'checklists' => $checklists]);
+}
+
+function get_item_time($item): int
+{
+    if (!is_array($item)) return 0;
+    // Cari atribut waktu (yang mana saja yang tersedia di objek)
+    $t = $item['timestamp'] ?? $item['updatedAt'] ?? $item['submittedAt'] ?? $item['approvedAt'] ?? $item['createdAt'] ?? 0;
+    return is_string($t) ? (strtotime($t) ?: 0) : (int) $t;
+}
+
+function merge_objects_with_tombstones(array $current, array $incoming): array
+{
+    $merged = [];
+    $allKeys = array_unique(array_merge(array_keys($current), array_keys($incoming)));
+
+    foreach ($allKeys as $key) {
+        $currItem = $current[$key] ?? null;
+        $incItem = $incoming[$key] ?? null;
+
+        if ($currItem === null) { $merged[$key] = $incItem; continue; }
+        if ($incItem === null) { $merged[$key] = $currItem; continue; }
+
+        $currTime = get_item_time($currItem);
+        $incTime = get_item_time($incItem);
+
+        // Data dengan timestamp paling baru yang akan disimpan (hidup ataupun _deleted)
+        $merged[$key] = ($incTime >= $currTime) ? $incItem : $currItem;
+    }
+    return $merged;
+}
+
+function merge_states(array $current, array $incoming): array
+{
+    // Mulai dengan state saat ini di server sebagai dasar
+    $merged = $current;
+
+    if (isset($incoming['evaluations']) || isset($current['evaluations'])) {
+        $merged['evaluations'] = merge_objects_with_tombstones($current['evaluations'] ?? [], $incoming['evaluations'] ?? []);
+    }
+    if (isset($incoming['accounts']) || isset($current['accounts'])) {
+        $merged['accounts'] = merge_objects_with_tombstones($current['accounts'] ?? [], $incoming['accounts'] ?? []);
+    }
+
+    // Untuk array objek seperti 'signupRequests', kita gabungkan berdasarkan ID unik.
+    if (isset($incoming['signupRequests'])) {
+        $requestsById = [];
+        foreach (($current['signupRequests'] ?? []) as $req) $requestsById[$req['id']] = $req;
+        foreach ($incoming['signupRequests'] as $req) $requestsById[$req['id']] = $req;
+        $merged['signupRequests'] = array_values($requestsById);
+    }
+
+    // Untuk nilai tunggal atau objek kompleks yang harus diganti seluruhnya,
+    // kita ambil dari '$incoming' karena itu adalah perubahan yang paling baru.
+    if (isset($incoming['totalShu'])) $merged['totalShu'] = $incoming['totalShu'];
+    if (isset($incoming['shuDistribution'])) $merged['shuDistribution'] = $incoming['shuDistribution'];
+    if (isset($incoming['cashFlow'])) $merged['cashFlow'] = $incoming['cashFlow'];
+
+    return $merged;
+}
+
+function save_checklists_response(array $payload): void
+{
+    $db = db();
+    $db->beginTransaction();
+    try {
+        $db->exec('DELETE FROM app_checklist_items');
+        
+        $item_stmt = $db->prepare('INSERT INTO app_checklist_items (role_id, no, area, task, frequency, weight) VALUES (?, ?, ?, ?, ?, ?)');
+        if (isset($payload['checklists']) && is_array($payload['checklists'])) {
+            foreach ($payload['checklists'] as $role_id => $items) {
+                if (is_array($items)) {
+                    foreach ($items as $item) {
+                        $item_stmt->execute([$role_id, (int) ($item['no'] ?? 0), (string) ($item['area'] ?? ''), (string) ($item['task'] ?? ''), (string) ($item['frequency'] ?? ''), (int) ($item['weight'] ?? 0)]);
+                    }
+                }
+            }
+        }
+        $db->commit();
+        json_response(['ok' => true]);
+    } catch (Throwable $e) {
+        $db->rollBack();
+        json_response(['ok' => false, 'error' => 'Gagal menyimpan checklist: ' . $e->getMessage()], 500);
+    }
+}
+
+function add_role_response(array $payload): void
+{
+    $id = trim((string) ($payload['id'] ?? ''));
+    $name = trim((string) ($payload['name'] ?? ''));
+    $role = trim((string) ($payload['role'] ?? ''));
+    $focus = trim((string) ($payload['focus'] ?? ''));
+
+    if ($id === '' || $name === '' || $role === '') {
+        json_response(['ok' => false, 'error' => 'Data jabatan tidak lengkap.'], 400);
+    }
+
+    try {
+        $stmt = db()->prepare('INSERT INTO app_roles (id, name, role, focus) VALUES (?, ?, ?, ?)');
+        $stmt->execute([$id, $name, $role, $focus]);
+        json_response(['ok' => true]);
+    } catch (PDOException $e) {
+        if ($e->getCode() == 23000 || $e->getCode() == 1062) {
+            json_response(['ok' => false, 'error' => 'ID Jabatan sudah ada.'], 400);
+        }
+        json_response(['ok' => false, 'error' => 'Gagal menyimpan jabatan: ' . $e->getMessage()], 500);
+    }
+}
+
+function prune_old_tombstones(array $state, int $max_age_seconds = 2592000): array
+{
+    // Batas waktu: 30 hari (30 * 24 * 60 * 60 = 2592000 detik)
+    $threshold = time() - $max_age_seconds;
+
+    $collections = ['accounts', 'evaluations'];
+    foreach ($collections as $collection) {
+        if (isset($state[$collection]) && is_array($state[$collection])) {
+            foreach ($state[$collection] as $key => $item) {
+                if (is_array($item) && !empty($item['_deleted'])) {
+                    $itemTime = get_item_time($item);
+                    // Jika timestamp valid dan usianya lebih tua dari 30 hari
+                    if ($itemTime > 0 && $itemTime < $threshold) {
+                        // Kadaluarsa: Hapus dari JSON secara fisik
+                        unset($state[$collection][$key]);
+                    }
+                }
+            }
+        }
+    }
+    return $state;
 }
 
 try {
@@ -276,6 +430,18 @@ try {
     }
 
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (($_GET['action'] ?? '') === 'save_checklists') {
+            $raw = file_get_contents('php://input') ?: '';
+            $payload = json_decode($raw, true);
+            save_checklists_response($payload ?: []);
+        }
+
+        if (($_GET['action'] ?? '') === 'add_role') {
+            $raw = file_get_contents('php://input') ?: '';
+            $payload = json_decode($raw, true);
+            add_role_response($payload ?: []);
+        }
+
         $raw = file_get_contents('php://input') ?: '';
         if (strlen($raw) > 12 * 1024 * 1024) {
             json_response(['ok' => false, 'error' => 'Payload terlalu besar.'], 413);
@@ -285,6 +451,22 @@ try {
         if (!is_array($payload) || !isset($payload['state']) || !is_array($payload['state'])) {
             json_response(['ok' => false, 'error' => 'Payload tidak valid.'], 422);
         }
+
+        // Pengecekan Optimistic Concurrency Control (OCC)
+        $expectedRevision = $payload['expectedRevision'] ?? null;
+        $currentRow = load_state_row();
+        $currentRevision = state_revision($currentRow);
+
+        if ($currentRevision !== null && $expectedRevision !== $currentRevision) {
+            // Terjadi konflik! Alih-alih menolak, kita coba gabungkan (merge).
+            $currentStateData = json_decode((string) $currentRow['state_json'], true);
+            $mergedState = merge_states($currentStateData, $payload['state']);
+            // Setelah digabung, kita gunakan state hasil gabungan untuk disimpan.
+            $payload['state'] = $mergedState;
+        }
+
+        // Bersihkan tombstone (batu nisan) yang sudah kedaluwarsa sebelum disimpan ke database
+        $payload['state'] = prune_old_tombstones($payload['state']);
 
         $stateJson = json_encode($payload['state'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         if ($stateJson === false) {
