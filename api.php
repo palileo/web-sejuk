@@ -38,6 +38,14 @@ function load_state_row(): ?array
     return $row ?: null;
 }
 
+function state_revision(?array $row): ?string
+{
+    if (!$row || !isset($row['state_json'])) {
+        return null;
+    }
+    return hash('sha256', (string) $row['state_json']);
+}
+
 function safe_download_name(string $name): string
 {
     $name = trim(preg_replace('/[^A-Za-z0-9._ -]+/', '_', $name) ?: '');
@@ -263,6 +271,7 @@ try {
             'ok' => true,
             'state' => $row ? json_decode((string) $row['state_json'], true) : null,
             'updatedAt' => $row['updated_at'] ?? null,
+            'revision' => state_revision($row),
         ]);
     }
 
@@ -289,7 +298,8 @@ try {
         ');
         $stmt->execute([APP_STATE_KEY, $stateJson]);
 
-        json_response(['ok' => true]);
+        $saved = load_state_row();
+        json_response(['ok' => true, 'updatedAt' => $saved['updated_at'] ?? null, 'revision' => state_revision($saved)]);
     }
 
     json_response(['ok' => false, 'error' => 'Metode tidak didukung.'], 405);

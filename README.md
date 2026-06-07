@@ -118,7 +118,7 @@ git push -u origin main
 
 ## Catatan Produksi
 
-Versi ini adalah prototipe front-end. Data checklist, akun, request sign up, request ganti password, dan approval admin tersimpan di `localStorage` browser, sehingga belum sinkron antar perangkat. Untuk penggunaan organisasi yang nyata, pindahkan autentikasi dan penyimpanan data ke backend, misalnya Laravel/Node.js + MySQL/PostgreSQL/Firebase.
+Versi ini adalah prototipe front-end dengan sinkronisasi MySQL melalui `api.php`. Data checklist, akun, request sign up, total SHU, persentase SHU, dan file arus kas disimpan di database dengan salinan lokal browser sebagai cadangan saat koneksi API gagal.
 
 Password aplikasi statis masih tersimpan di browser/file JavaScript, sehingga belum aman untuk data sensitif. Gunakan versi backend sebelum aplikasi dipakai sebagai sistem resmi multi-pengguna.
 

@@ -36,6 +36,8 @@ let remoteSaveTimer = null;
 let remoteReady = false;
 let deferredInstallPrompt = null;
 let needsRender = false;
+let hasLoadedRemoteState = false;
+let lastAppliedRevision = "";
 
 function defaultAccounts(){ return { [ADMIN_ACCOUNT.id]: { id: ADMIN_ACCOUNT.id, memberId: null, name: ADMIN_ACCOUNT.name, role: ADMIN_ACCOUNT.role, password: ADMIN_ACCOUNT.password, type: "admin", status: "approved", createdAt: new Date().toISOString(), approvedAt: new Date().toISOString() } }; }
 function loadState(){
@@ -129,7 +131,9 @@ function scheduleRemoteSave(){
   clearTimeout(remoteSaveTimer);
   remoteSaveTimer = setTimeout(pushRemoteState, 550);
 }
-async function pullRemoteState(){
+async function pullRemoteState(options = {}){
+  const preferRemote = options.preferRemote === true;
+  const silent = options.silent !== false;
   try {
     const response = await fetch(API_URL, { headers: { "Accept": "application/json" }, cache: "no-store" });
     if(!response.ok) throw new Error("API database belum siap.");
@@ -137,18 +141,15 @@ async function pullRemoteState(){
     if(result?.state){
       const remoteState = normalizeState(result.state);
       const serverTime = result.updatedAt;
-      const lastServerTime = localStorage.getItem("koperasi_last_server_time");
+      const revision = result.revision || "";
+      const lastRevision = localStorage.getItem("koperasi_last_server_revision");
       
-      if(serverTime === lastServerTime){
+      if(!preferRemote && hasLoadedRemoteState && revision && revision === lastRevision){
         remoteReady = true;
-        const lastPushed = localStorage.getItem("koperasi_last_pushed_time");
-        if(state.updatedAt && state.updatedAt !== lastPushed){
-          pushRemoteState();
-        }
         return;
       }
       
-      if(state.updatedAt === remoteState.updatedAt){
+      if(!preferRemote && hasLoadedRemoteState && state.updatedAt === remoteState.updatedAt){
         remoteReady = true;
         if(serverTime) localStorage.setItem("koperasi_last_server_time", serverTime);
         return;
@@ -157,20 +158,25 @@ async function pullRemoteState(){
       state = remoteState;
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       if(serverTime) localStorage.setItem("koperasi_last_server_time", serverTime);
+      if(revision) localStorage.setItem("koperasi_last_server_revision", revision);
       localStorage.setItem("koperasi_last_pushed_time", state.updatedAt);
       remoteReady = true;
+      hasLoadedRemoteState = true;
+      const isNewRevision = Boolean(revision && revision !== lastAppliedRevision);
+      lastAppliedRevision = revision || lastAppliedRevision;
       
       const activeEl = document.activeElement;
       const isTyping = activeEl && ["INPUT", "TEXTAREA", "SELECT"].includes(activeEl.tagName);
       if(!isTyping) {
         render();
         needsRender = false;
+        if(isNewRevision && !preferRemote && !silent) toast("Data server diperbarui.");
       } else {
         needsRender = true;
       }
     } else {
       remoteReady = true;
-      if (state.updatedAt) pushRemoteState();
+      hasLoadedRemoteState = true;
     }
   } catch(error) {
     remoteReady = false;
@@ -187,7 +193,11 @@ async function pushRemoteState(){
       body: JSON.stringify({ state })
     });
     if(!response.ok) throw new Error("Sinkron database gagal.");
+    const result = await response.json().catch(() => ({}));
     remoteReady = true;
+    if(result?.updatedAt) localStorage.setItem("koperasi_last_server_time", result.updatedAt);
+    if(result?.revision) localStorage.setItem("koperasi_last_server_revision", result.revision);
+    if(result?.revision) lastAppliedRevision = result.revision;
     localStorage.setItem("koperasi_last_pushed_time", pushedTime);
     return true;
   } catch(error) {
@@ -324,9 +334,9 @@ function badgeClass(cat){ return cat === "Sangat Serius" ? "good" : cat === "Ser
 function getEvaluation(evaluatorId, targetId){
   return state.evaluations[key(evaluatorId,targetId)] || { evaluatorId, targetId, items:{}, submittedAt:null };
 }
-function setEvaluation(evaluation){
+function setEvaluation(evaluation, options = {}){
   state.evaluations[key(evaluation.evaluatorId,evaluation.targetId)] = evaluation;
-  saveState();
+  return saveState(options);
 }
 function allEvaluationRows(){ return Object.values(state.evaluations || {}).filter(e => e && e.evaluatorId !== e.targetId); }
 function calculateTarget(targetId, roleId){
@@ -634,8 +644,7 @@ function profileView(){
   const acc = activeAccount();
   const profile = acc?.profile || {};
   const photo = acc?.photo?.dataUrl || "";
-  const pendingPassword = (state.passwordRequests || []).filter(req => req.accountId === activeUser && req.status === "pending").length;
-  const passwordPanel = isAdmin() ? `<section class="card" style="margin-top:18px"><h2>Ganti Password Admin</h2><p class="muted">Password akan dienkripsi (hash) sebelum disimpan ke database.</p><form id="admin-password-form" class="stack" style="margin-top:14px"><label>Password Baru<span class="password-wrap"><input id="admin-new-password" type="password" autocomplete="new-password" minlength="6" placeholder="Minimal 6 karakter" required /><button id="toggle-admin-password" class="icon-btn" type="button" aria-label="Lihat password baru">Lihat</button></span></label><button class="primary" type="submit">Simpan Password</button><p id="admin-password-message" class="success hidden"></p><p id="admin-password-error" class="error hidden"></p></form></section>` : `<section class="card" style="margin-top:18px"><h2>Ganti Password</h2><p class="muted">Password baru aktif setelah admin melakukan approval.</p>${pendingPassword ? `<div class="note">Ada ${pendingPassword} request ganti password yang masih menunggu approval admin.</div>` : ""}<form id="password-change-form" class="stack" style="margin-top:14px"><label>Password Baru<span class="password-wrap"><input id="new-password" type="password" autocomplete="new-password" minlength="6" placeholder="Minimal 6 karakter" required /><button id="toggle-new-password" class="icon-btn" type="button" aria-label="Lihat password baru">Lihat</button></span></label><label>Catatan untuk Admin<textarea id="password-change-note" placeholder="Contoh: mohon approve ganti password saya."></textarea></label><button class="primary" type="submit">Ajukan Ganti Password</button><p id="password-change-message" class="success hidden"></p><p id="password-change-error" class="error hidden"></p></form></section>`;
+  const passwordPanel = isAdmin() ? `<section class="card" style="margin-top:18px"><h2>Ganti Password Admin</h2><p class="muted">Password langsung dienkripsi dan disimpan ke database.</p><form id="admin-password-form" class="stack" style="margin-top:14px"><label>Password Baru<span class="password-wrap"><input id="admin-new-password" type="password" autocomplete="new-password" minlength="6" placeholder="Minimal 6 karakter" required /><button id="toggle-admin-password" class="icon-btn" type="button" aria-label="Lihat password baru">Lihat</button></span></label><button class="primary" type="submit">Simpan Password</button><p id="admin-password-message" class="success hidden"></p><p id="admin-password-error" class="error hidden"></p></form></section>` : `<section class="card" style="margin-top:18px"><h2>Ganti Password</h2><p class="muted">Password langsung dienkripsi dan disimpan ke database.</p><form id="password-change-form" class="stack" style="margin-top:14px"><label>Password Baru<span class="password-wrap"><input id="new-password" type="password" autocomplete="new-password" minlength="6" placeholder="Minimal 6 karakter" required /><button id="toggle-new-password" class="icon-btn" type="button" aria-label="Lihat password baru">Lihat</button></span></label><button class="primary" type="submit">Simpan Password</button><p id="password-change-message" class="success hidden"></p><p id="password-change-error" class="error hidden"></p></form></section>`;
   return `<section class="card profile-card">
     <div class="profile-head">
       <div class="avatar">${photo ? `<img src="${safe(photo)}" alt="Foto profil ${safe(acc?.name || "")}">` : safe((acc?.name || "U").slice(0,1).toUpperCase())}</div>
@@ -679,8 +688,8 @@ function bindProfileView(){
       nomorWa: document.querySelector("#profile-wa").value.trim()
     };
     acc.name = acc.profile.nama || acc.name;
-    saveState();
-    toast("Profil disimpan.");
+    const saved = await saveState({ immediate: true });
+    toast(saved ? "Profil tersimpan ke database." : "Profil tersimpan lokal. Sinkron database belum berhasil.");
     renderShell();
   };
   bindPasswordPanel();
@@ -765,12 +774,16 @@ async function bindInputView(){
       toast(error.message || "Upload bukti gagal.");
       return;
     }
-    setEvaluation({ evaluatorId: activeUser, targetId: selectedTarget, items, submittedAt: new Date().toISOString() });
-    toast("Checklist berhasil disimpan.");
+    const savedToDatabase = await setEvaluation({ evaluatorId: activeUser, targetId: selectedTarget, items, submittedAt: new Date().toISOString() }, { immediate: true });
+    toast(savedToDatabase ? "Checklist tersimpan ke database." : "Checklist tersimpan lokal. Sinkron database belum berhasil.");
     renderView();
   };
   document.querySelector("#reset-current").onclick = () => {
-    if(confirm("Kosongkan penilaian Anda untuk pengurus ini?")){ delete state.evaluations[key(activeUser,selectedTarget)]; saveState(); toast("Penilaian dikosongkan."); renderView(); }
+    if(confirm("Kosongkan penilaian Anda untuk pengurus ini?")){
+      delete state.evaluations[key(activeUser,selectedTarget)];
+      saveState({ immediate: true }).then(saved => toast(saved ? "Penilaian dikosongkan dan tersimpan ke database." : "Penilaian dikosongkan lokal. Sinkron database belum berhasil."));
+      renderView();
+    }
   };
 }
 function evaluationsView(){
@@ -784,7 +797,21 @@ function evaluationRow(ev, showEvaluator = true){
   Object.values(ev.items||{}).forEach(a => { const rating = answerRating(a); if(counts[rating] !== undefined) counts[rating]++; });
   const proofCount = Object.values(ev.items||{}).filter(a => a.proof || a.proofFile).length;
   const resultCells = `<td>${safe(targetAccount?.name)}</td><td>${ev.submittedAt ? new Date(ev.submittedAt).toLocaleString('id-ID') : '-'}</td><td>${[5,4,3,2,1].map(rate => `${ratingStars(rate)}: ${counts[rate]}`).join("<br>")}<br>Bukti: ${proofCount}</td>`;
-  return showEvaluator ? `<tr><td><strong>${safe(evaluatorAccount?.name)}</strong></td>${resultCells}</tr>` : `<tr>${resultCells}</tr>`;
+  return showEvaluator ? `<tr><td><strong>${safe(evaluatorAccount?.name)}</strong></td>${resultCells}<td>${evaluationChecklistDetail(ev)}</td></tr>` : `<tr>${resultCells}</tr>`;
+}
+function evaluationChecklistDetail(ev){
+  const targetAccount = account(ev.targetId);
+  const checklist = APP_CONFIG.checklists[targetAccount?.memberId] || [];
+  if(!checklist.length) return `<span class="muted">Checklist role tidak ditemukan.</span>`;
+  const filled = checklist.filter(item => answerRating(ev.items?.[item.no]) > 0).length;
+  const rows = checklist.map(item => {
+    const answer = ev.items?.[item.no] || {};
+    const rating = answerRating(answer);
+    const proof = answer.proof || answer.proofFile?.name;
+    const note = answer.note;
+    return `<li><strong>${item.no}. ${safe(item.area)}</strong> ${rating ? ratingStars(rating) : '<span class="muted">Belum dinilai</span>'}<br><span>${safe(item.task)}</span>${proof ? `<br><span class="muted">Bukti: ${safe(proof)}</span>` : ""}${note ? `<br><span class="muted">Catatan: ${safe(note)}</span>` : ""}</li>`;
+  }).join("");
+  return `<details><summary>${filled}/${checklist.length} item terisi</summary><ol class="detail-list">${rows}</ol></details>`;
 }
 function shuView(){
   const rows = registeredShuRows();
@@ -1084,7 +1111,7 @@ function adminEvaluationsView(){
   </div>
   <section class="card" style="margin-top:18px">
     <div class="toolbar"><div><h2>Aktivitas Penilaian User</h2><p class="muted">Admin dapat melihat siapa yang memberi penilaian, siapa yang dinilai, tanggal, dan ringkasan hasil.</p></div><div class="actions">${openFileButton}</div></div>
-    ${evaluations.length ? `<div class="table-wrap"><table><thead><tr><th>Evaluator</th><th>Dinilai</th><th>Tanggal</th><th>Ringkasan Nilai</th></tr></thead><tbody>${evaluations.map(ev => evaluationRow(ev, true)).join("")}</tbody></table></div>` : '<div class="empty">Belum ada aktivitas penilaian.</div>'}
+    ${evaluations.length ? `<div class="table-wrap"><table><thead><tr><th>Evaluator</th><th>Dinilai</th><th>Tanggal</th><th>Ringkasan Nilai</th><th>Detail Checklist</th></tr></thead><tbody>${evaluations.map(ev => evaluationRow(ev, true)).join("")}</tbody></table></div>` : '<div class="empty">Belum ada aktivitas penilaian.</div>'}
   </section>
   <section class="card" style="margin-top:18px">
     <div class="toolbar"><div><h2>Data Pembagian SHU Semua User</h2><p class="muted">Tabel ini memakai data user approved, total SHU, persentase arus kas, dan hasil penilaian terbaru.</p></div><button class="ghost" onclick="window.print()">Cetak</button></div>
@@ -1093,15 +1120,14 @@ function adminEvaluationsView(){
 }
 function adminView(){
   const requests = state.signupRequests || [];
-  const passwordRequests = state.passwordRequests || [];
   const pending = requests.filter(req => req.status === "pending");
-  const pendingPassword = passwordRequests.filter(req => req.status === "pending");
   const approved = visibleAccounts().filter(acc => acc.status === "approved");
   const rejected = requests.filter(req => req.status === "rejected");
+  const evaluationCount = allEvaluationRows().length;
   const openFileButton = state.cashFlow?.fileDataUrl ? `<button class="ghost open-cashflow-file" type="button">Buka File Arus Kas</button>` : "";
   return `<div class="grid cards">
     <article class="card metric"><span>Request Pending</span><strong>${pending.length}</strong></article>
-    <article class="card metric"><span>Ganti Password</span><strong>${pendingPassword.length}</strong></article>
+    <article class="card metric"><span>Data Penilaian</span><strong>${evaluationCount}</strong></article>
     <article class="card metric"><span>Akun Approved</span><strong>${approved.length}</strong></article>
     <article class="card metric"><span>Request Rejected</span><strong>${rejected.length}</strong></article>
   </div>
@@ -1109,14 +1135,6 @@ function adminView(){
   <section class="card" style="margin-top:18px">
     <div class="toolbar"><div><h2>Verifikasi Pengguna Baru</h2><p class="muted">Approve untuk mengaktifkan akun. Reject untuk menolak request sign up.</p></div></div>
     ${pending.length ? `<div class="table-wrap"><table><thead><tr><th>Akses</th><th>Data Diri</th><th>Catatan</th><th>Tanggal</th><th>Aksi</th></tr></thead><tbody>${pending.map(req => requestRow(req, true)).join("")}</tbody></table></div>` : '<div class="empty">Tidak ada request pending.</div>'}
-  </section>
-  <section class="card" style="margin-top:18px">
-    <div class="toolbar"><div><h2>Approval Ganti Password</h2><p class="muted">Approve untuk mengaktifkan password baru. Reject untuk membatalkan request.</p></div></div>
-    ${pendingPassword.length ? `<div class="table-wrap"><table><thead><tr><th>Akun</th><th>Catatan</th><th>Tanggal</th><th>Aksi</th></tr></thead><tbody>${pendingPassword.map(req => passwordRequestRow(req, true)).join("")}</tbody></table></div>` : '<div class="empty">Tidak ada request ganti password pending.</div>'}
-  </section>
-  <section class="card" style="margin-top:18px">
-    <h2>Riwayat Ganti Password</h2>
-    ${passwordRequests.length ? `<div class="table-wrap"><table><thead><tr><th>Akun</th><th>Catatan</th><th>Status</th><th>Tanggal</th><th>Diputuskan</th></tr></thead><tbody>${passwordRequests.map(req => passwordRequestRow(req, false)).join("")}</tbody></table></div>` : '<div class="empty">Belum ada request ganti password.</div>'}
   </section>
   <section class="card" style="margin-top:18px">
     <h2>Riwayat Request</h2>
@@ -1181,8 +1199,6 @@ function bindAdminView(){
   bindOpenCashFlowButtons();
   document.querySelectorAll(".approve-request").forEach(btn => btn.onclick = () => decideSignup(btn.dataset.request, "approved"));
   document.querySelectorAll(".reject-request").forEach(btn => btn.onclick = () => decideSignup(btn.dataset.request, "rejected"));
-  document.querySelectorAll(".approve-password-request").forEach(btn => btn.onclick = () => decidePasswordRequest(btn.dataset.request, "approved"));
-  document.querySelectorAll(".reject-password-request").forEach(btn => btn.onclick = () => decidePasswordRequest(btn.dataset.request, "rejected"));
   bindUserManagementControls();
 }
 function bindUserManagementControls(){
@@ -1206,9 +1222,9 @@ function bindUserManagementControls(){
       acc.role = document.querySelector("#edit-user-role").value;
       if(id !== ADMIN_ACCOUNT.id) acc.status = document.querySelector("#edit-user-status").value;
       if(password) acc.password = await hashPassword(password);
-      saveState();
+      const saved = await saveState({ immediate: true });
       editingUserId = null;
-      toast("Data user disimpan.");
+      toast(saved ? "Data user tersimpan ke database." : "Data user tersimpan lokal. Sinkron database belum berhasil.");
       renderView();
     };
   }
@@ -1251,33 +1267,9 @@ async function decideSignup(requestId, status){
   await saveState({ immediate: true });
   await renderView();
 }
-function passwordRequestRow(req, withActions){
-  if(!withActions){
-    const decided = req.decidedAt ? new Date(req.decidedAt).toLocaleString("id-ID") : "-";
-    return `<tr><td><strong>${safe(req.name)}</strong><br><span class="muted">${safe(req.role)}</span></td><td>${safe(req.note || "-")}</td><td>${statusBadge(req.status)}</td><td>${new Date(req.requestedAt).toLocaleString("id-ID")}</td><td>${decided}</td></tr>`;
-  }
-  return `<tr><td><strong>${safe(req.name)}</strong><br><span class="muted">${safe(req.role)}</span></td><td>${safe(req.note || "-")}</td><td>${new Date(req.requestedAt).toLocaleString("id-ID")}</td><td><div class="actions"><button class="primary approve-password-request" data-request="${req.id}" type="button">Approve</button><button class="danger reject-password-request" data-request="${req.id}" type="button">Reject</button></div></td></tr>`;
-}
-async function decidePasswordRequest(requestId, status){
-  const req = state.passwordRequests.find(item => item.id === requestId);
-  if(!req) return;
-  req.status = status;
-  req.decidedAt = new Date().toISOString();
-  req.decidedBy = activeUser;
-  if(status === "approved"){
-    const acc = account(req.accountId);
-    if(acc) acc.password = await hashPassword(req.newPassword);
-    toast(`Password ${req.name} disetujui.`);
-  } else {
-    toast(`Request password ${req.name} ditolak.`);
-  }
-  await saveState({ immediate: true });
-  await renderView();
-}
 function settingsView(){
   const acc = activeAccount();
-  const pendingPassword = (state.passwordRequests || []).filter(req => req.accountId === activeUser && req.status === "pending").length;
-  const passwordPanel = isAdmin() ? "" : `<section class="card" style="margin-top:18px"><h2>Ajukan Ganti Password</h2><p class="muted">Password baru akan aktif setelah admin melakukan approval.</p>${pendingPassword ? `<div class="note">Ada ${pendingPassword} request ganti password yang masih menunggu approval admin.</div>` : ""}<form id="password-change-form" class="stack" style="margin-top:14px"><label>Password Baru<span class="password-wrap"><input id="new-password" type="password" autocomplete="new-password" minlength="6" placeholder="Minimal 6 karakter" required /><button id="toggle-new-password" class="icon-btn" type="button" aria-label="Lihat password baru">Lihat</button></span></label><label>Catatan untuk Admin<textarea id="password-change-note" placeholder="Contoh: mohon approve ganti password saya."></textarea></label><button class="primary" type="submit">Ajukan Ganti Password</button><p id="password-change-message" class="success hidden"></p><p id="password-change-error" class="error hidden"></p></form></section>`;
+  const passwordPanel = isAdmin() ? "" : `<section class="card" style="margin-top:18px"><h2>Ganti Password</h2><p class="muted">Password langsung dienkripsi dan disimpan ke database.</p><form id="password-change-form" class="stack" style="margin-top:14px"><label>Password Baru<span class="password-wrap"><input id="new-password" type="password" autocomplete="new-password" minlength="6" placeholder="Minimal 6 karakter" required /><button id="toggle-new-password" class="icon-btn" type="button" aria-label="Lihat password baru">Lihat</button></span></label><button class="primary" type="submit">Simpan Password</button><p id="password-change-message" class="success hidden"></p><p id="password-change-error" class="error hidden"></p></form></section>`;
   const adminUserPanel = isAdmin() ? userManagementSection() : "";
   const openFileButton = state.cashFlow?.fileDataUrl ? `<button class="ghost open-cashflow-file" type="button">Buka File Arus Kas</button>` : "";
   const backupPanel = isAdmin() ? `<section class="card" style="margin-top:18px"><div class="toolbar"><div><h2>Backup Database Server</h2><p class="muted">Daftar file backup database (.sql) yang dibuat otomatis oleh server atau secara manual.</p></div><button id="generate-backup" class="primary" type="button">Buat Backup Sekarang</button></div><div id="backup-list"><div class="empty">Memuat data backup...</div></div></section>` : "";
@@ -1311,7 +1303,7 @@ function bindSettingsView(){
   }
   bindPasswordPanel();
   bindOpenCashFlowButtons();
-  document.querySelector("#clear-data").onclick = async () => { if(confirm("Hapus semua data penilaian, akun, request sign up, request ganti password, arus kas, dan total SHU di browser ini?")){ state = { evaluations:{}, totalShu:0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt:null}; await saveState({ immediate: true }); toast("Data dihapus."); await renderView(); } };
+  document.querySelector("#clear-data").onclick = async () => { if(confirm("Hapus semua data penilaian, akun, request sign up, arus kas, dan total SHU di browser ini?")){ state = { evaluations:{}, totalShu:0, shuDistribution: defaultShuDistribution(), cashFlow: null, accounts: defaultAccounts(), signupRequests: [], passwordRequests: [], authSchemaVersion: AUTH_SCHEMA_VERSION, updatedAt:null}; await saveState({ immediate: true }); toast("Data dihapus."); await renderView(); } };
 }
 async function loadServerBackups() {
   const list = document.querySelector("#backup-list");
@@ -1333,26 +1325,20 @@ function bindPasswordPanel(){
   const passwordForm = document.querySelector("#password-change-form");
   if(passwordForm){
     bindPasswordToggle("#new-password", "#toggle-new-password");
-    passwordForm.onsubmit = e => {
+    passwordForm.onsubmit = async e => {
       e.preventDefault();
       const password = document.querySelector("#new-password").value;
-      const note = document.querySelector("#password-change-note").value.trim();
       if(password.length < 6){
         document.querySelector("#password-change-error").textContent = "Password minimal 6 karakter.";
         document.querySelector("#password-change-error").classList.remove("hidden");
         return;
       }
-      const existingPending = (state.passwordRequests || []).some(req => req.accountId === activeUser && req.status === "pending");
-      if(existingPending){
-        document.querySelector("#password-change-error").textContent = "Masih ada request ganti password yang menunggu approval admin.";
-        document.querySelector("#password-change-error").classList.remove("hidden");
-        return;
-      }
       const acc = activeAccount();
-      state.passwordRequests.unshift({ id: `pwd_${Date.now()}`, accountId: activeUser, name: acc.name, role: acc.role, newPassword: password, note, status: "pending", requestedAt: new Date().toISOString(), decidedAt: null, decidedBy: null });
-      saveState();
+      if(!acc) return;
+      acc.password = await hashPassword(password);
+      const saved = await saveState({ immediate: true });
       document.querySelector("#password-change-error").classList.add("hidden");
-      document.querySelector("#password-change-message").textContent = "Request ganti password terkirim. Tunggu approval admin.";
+      document.querySelector("#password-change-message").textContent = saved ? "Password berhasil diubah dan tersimpan ke database." : "Password diubah lokal. Sinkron database belum berhasil.";
       document.querySelector("#password-change-message").classList.remove("hidden");
       passwordForm.reset();
     };
@@ -1371,9 +1357,9 @@ function bindPasswordPanel(){
       const acc = activeAccount();
       if(acc) {
         acc.password = await hashPassword(password);
-        saveState();
+        const saved = await saveState({ immediate: true });
         document.querySelector("#admin-password-error").classList.add("hidden");
-        document.querySelector("#admin-password-message").textContent = "Password berhasil diubah dan dienkripsi.";
+        document.querySelector("#admin-password-message").textContent = saved ? "Password berhasil diubah dan tersimpan ke database." : "Password diubah lokal. Sinkron database belum berhasil.";
         document.querySelector("#admin-password-message").classList.remove("hidden");
         adminPasswordForm.reset();
       }
@@ -1409,10 +1395,14 @@ async function main() {
     return;
   }
 
-  await pullRemoteState();
+  await pullRemoteState({ preferRemote: true });
   await render();
   setupInstallPrompt();
-  setInterval(pullRemoteState, 5000);
+  setInterval(() => pullRemoteState({ silent: false }), 2500);
+  window.addEventListener("focus", () => pullRemoteState({ silent: false }));
+  document.addEventListener("visibilitychange", () => {
+    if(!document.hidden) pullRemoteState({ silent: false });
+  });
 
   document.addEventListener("focusout", () => {
     setTimeout(async () => {
